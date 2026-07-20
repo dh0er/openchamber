@@ -15,6 +15,10 @@ export type UpdateInfo = {
   available: boolean;
   version?: string;
   currentVersion: string;
+  updateKind?: 'source-rebase';
+  currentRevision?: string;
+  targetRevision?: string;
+  prepared?: boolean;
   body?: string;
   date?: string;
   releaseUrl?: string;
@@ -25,9 +29,29 @@ export type UpdateInfo = {
   updateCommand?: string;
 };
 
+export type SourceUpdateFailureReport = {
+  summary: string;
+  stage: string;
+  conflictFiles: string[];
+  patchSubject?: string;
+  reportPath?: string;
+  logTail?: string;
+};
+
 export type UpdateProgress = {
   downloaded: number;
   total?: number;
+  event?: 'Started' | 'Progress' | 'Finished' | 'Failed';
+  phase?: string;
+  message?: string;
+  step?: number;
+  stepCount?: number;
+  report?: SourceUpdateFailureReport;
+};
+
+export type DesktopUpdateResult = {
+  ok: boolean;
+  progress?: UpdateProgress;
 };
 
 export type SkillCatalogConfig = {
@@ -663,11 +687,79 @@ export const checkForDesktopUpdates = async (): Promise<UpdateInfo | null> => {
   return info as UpdateInfo;
 };
 
+const readUpdateFailureReport = (value: unknown): SourceUpdateFailureReport | undefined => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const report = value as Record<string, unknown>;
+  if (typeof report.summary !== 'string' || typeof report.stage !== 'string') {
+    return undefined;
+  }
+
+  return {
+    summary: report.summary,
+    stage: report.stage,
+    conflictFiles: Array.isArray(report.conflictFiles)
+      ? report.conflictFiles.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+    patchSubject: typeof report.patchSubject === 'string' ? report.patchSubject : undefined,
+    reportPath: typeof report.reportPath === 'string' ? report.reportPath : undefined,
+    logTail: typeof report.logTail === 'string' ? report.logTail : undefined,
+  };
+};
+
+const readUpdateProgress = (
+  eventName: UpdateProgress['event'],
+  eventData: Record<string, unknown> | null,
+  previous: Pick<UpdateProgress, 'downloaded' | 'total'>,
+): UpdateProgress => {
+  const downloaded = typeof eventData?.downloaded === 'number'
+    ? eventData.downloaded
+    : previous.downloaded;
+  const total = typeof eventData?.total === 'number'
+    ? eventData.total
+    : typeof eventData?.contentLength === 'number'
+      ? eventData.contentLength
+      : previous.total;
+
+  return {
+    downloaded,
+    total,
+    event: eventName,
+    phase: typeof eventData?.phase === 'string' ? eventData.phase : undefined,
+    message: typeof eventData?.message === 'string' ? eventData.message : undefined,
+    step: typeof eventData?.step === 'number' ? eventData.step : undefined,
+    stepCount: typeof eventData?.stepCount === 'number' ? eventData.stepCount : undefined,
+    report: readUpdateFailureReport(eventData?.report),
+  };
+};
+
+const readUpdateProgressEnvelope = (
+  value: unknown,
+  previous: Pick<UpdateProgress, 'downloaded' | 'total'>,
+): UpdateProgress | undefined => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const envelope = value as Record<string, unknown>;
+  const eventName = envelope.event;
+  if (eventName !== 'Started' && eventName !== 'Progress' && eventName !== 'Finished' && eventName !== 'Failed') {
+    return undefined;
+  }
+
+  const eventData = envelope.data && typeof envelope.data === 'object' && !Array.isArray(envelope.data)
+    ? envelope.data as Record<string, unknown>
+    : null;
+  return readUpdateProgress(eventName, eventData, previous);
+};
+
 export const downloadDesktopUpdate = async (
   onProgress?: (progress: UpdateProgress) => void
-): Promise<boolean> => {
+): Promise<DesktopUpdateResult> => {
   if (!hasDesktopInvoke()) {
-    return false;
+    return { ok: false };
   }
 
   const bridge = getDesktopBridge();
@@ -678,36 +770,34 @@ export const downloadDesktopUpdate = async (
   try {
     if (typeof onProgress === 'function' && bridge?.listen) {
       unlisten = await bridge.listen('openchamber:update-progress', (evt) => {
-        const payload = evt?.payload;
-        if (!payload || typeof payload !== 'object') return;
-        const data = payload as { event?: unknown; data?: unknown };
-        const eventName = typeof data.event === 'string' ? data.event : null;
-        const eventData = data.data && typeof data.data === 'object' ? (data.data as Record<string, unknown>) : null;
-
-        if (eventName === 'Started') {
-          downloaded = 0;
-          total = typeof eventData?.contentLength === 'number' ? (eventData.contentLength as number) : undefined;
-          onProgress({ downloaded, total });
-          return;
-        }
-
-        if (eventName === 'Progress') {
-          const d = eventData?.downloaded;
-          const t = eventData?.total;
-          if (typeof d === 'number') downloaded = d;
-          if (typeof t === 'number') total = t;
-          onProgress({ downloaded, total });
-          return;
-        }
-
-        if (eventName === 'Finished') {
-          onProgress({ downloaded, total });
-        }
+        const nextProgress = readUpdateProgressEnvelope(evt?.payload, { downloaded, total });
+        if (!nextProgress) return;
+        downloaded = nextProgress.downloaded;
+        total = nextProgress.total;
+        onProgress(nextProgress);
       });
     }
 
-    await invokeDesktop('desktop_download_and_install_update');
-    return true;
+    const rawResult = await invokeDesktop<unknown>('desktop_download_and_install_update');
+    if (!rawResult || typeof rawResult !== 'object' || Array.isArray(rawResult)) {
+      return { ok: true };
+    }
+
+    const result = rawResult as Record<string, unknown>;
+    if (typeof result.ok !== 'boolean') {
+      return { ok: true };
+    }
+
+    const terminalProgress = readUpdateProgressEnvelope(result.progress, { downloaded, total });
+    if (terminalProgress) {
+      downloaded = terminalProgress.downloaded;
+      total = terminalProgress.total;
+      onProgress?.(terminalProgress);
+    }
+    return {
+      ok: result.ok,
+      progress: terminalProgress,
+    };
   } catch (error) {
     // Propagate actionable updater capability / install errors to the UI store.
     throw error instanceof Error ? error : new Error(String(error));
@@ -730,7 +820,8 @@ export const restartToApplyUpdate = async (): Promise<boolean> => {
     return false;
   }
 
-  return restartDesktopApp();
+  await invokeDesktop('desktop_restart');
+  return true;
 };
 
 export const restartDesktopApp = async (): Promise<boolean> => {

@@ -13,6 +13,10 @@ import {
 } from '@/lib/desktop';
 import { runtimeFetch } from '@/lib/runtime-fetch';
 import { getClientPlatform, isCapacitorApp } from '@/lib/platform';
+import {
+  getSourceUpdateReportError,
+  resolveSourceUpdateCheckError,
+} from './sourceUpdateError';
 
 declare const __APP_VERSION__: string | undefined;
 
@@ -200,7 +204,14 @@ export const useUpdateStore = create<UpdateStore>()((set, get) => ({
     const runtime = detectRuntimeType();
     if (!runtime) return null;
 
-    set({ checking: true, error: null, runtimeType: runtime });
+    const currentState = get();
+    const preserveSourceState = runtime === 'desktop' && currentState.info?.updateKind === 'source-rebase';
+    const sourcePreparationAtStart = preserveSourceState && currentState.downloading;
+    set({
+      checking: true,
+      ...(!preserveSourceState ? { error: null } : {}),
+      runtimeType: runtime,
+    });
 
     try {
       let info: UpdateInfo | null = null;
@@ -212,16 +223,43 @@ export const useUpdateStore = create<UpdateStore>()((set, get) => ({
           checkForDesktopUpdates(),
           checkForWebUpdates('desktop', appVersion),
         ]);
-        const desktopInfo = desktopResult.status === 'fulfilled' ? desktopResult.value : null;
+        if (desktopResult.status === 'rejected') {
+          throw desktopResult.reason;
+        }
+        const desktopInfo = desktopResult.value;
         suggestedSec = apiResult.status === 'fulfilled'
           ? (apiResult.value?.nextSuggestedCheckInSec ?? null)
           : null;
-        set({
-          checking: false,
-          available: desktopInfo?.available ?? false,
-          info: desktopInfo,
-          lastChecked: Date.now(),
-          nextCheckInSec: suggestedSec,
+        set((state) => {
+          const commonState = {
+            checking: false,
+            lastChecked: Date.now(),
+            nextCheckInSec: suggestedSec,
+          };
+          const sourcePreparationRunning = state.downloading && state.info?.updateKind === 'source-rebase';
+          if (sourcePreparationAtStart || sourcePreparationRunning || (!desktopInfo && state.info?.updateKind === 'source-rebase')) {
+            return commonState;
+          }
+
+          if (desktopInfo?.updateKind === 'source-rebase') {
+            const targetChanged = state.info?.updateKind === 'source-rebase'
+              && state.info.targetRevision !== desktopInfo.targetRevision;
+            return {
+              ...commonState,
+              available: desktopInfo.available,
+              info: desktopInfo,
+              downloaded: desktopInfo.prepared === true,
+              ...(targetChanged
+                ? { progress: null, error: null }
+                : { error: getSourceUpdateReportError(state.progress) }),
+            };
+          }
+
+          return {
+            ...commonState,
+            available: desktopInfo?.available ?? false,
+            info: desktopInfo,
+          };
         });
 
         return suggestedSec;
@@ -246,10 +284,10 @@ export const useUpdateStore = create<UpdateStore>()((set, get) => ({
       });
       return suggestedSec;
     } catch (error) {
-      set({
+      set((state) => ({
         checking: false,
-        error: error instanceof Error ? error.message : 'Failed to check for updates',
-      });
+        error: resolveSourceUpdateCheckError(state.progress, error),
+      }));
       return null;
     }
   },
@@ -284,13 +322,27 @@ export const useUpdateStore = create<UpdateStore>()((set, get) => ({
           : desktopInfo,
       }));
 
-      const ok = await downloadDesktopUpdate((progress) => {
-        set({ progress });
+      const result = await downloadDesktopUpdate((progress) => {
+        set((state) => ({
+          progress: progress.report || !state.progress?.report
+            ? progress
+            : { ...progress, report: state.progress.report },
+        }));
       });
-      if (!ok) {
-        throw new Error('Desktop update only works on Local instance');
+      const finalProgress = result.progress ?? get().progress;
+      if (finalProgress?.event === 'Failed' || finalProgress?.report) {
+        throw new Error(finalProgress.report?.summary || finalProgress.message || 'Failed to prepare desktop update');
       }
-      set({ downloading: false, downloaded: true });
+      if (!result.ok) {
+        throw new Error(finalProgress?.message || 'Desktop update only works on Local instance');
+      }
+      set((state) => ({
+        downloading: false,
+        downloaded: true,
+        info: state.info?.updateKind === 'source-rebase'
+          ? { ...state.info, prepared: true }
+          : state.info,
+      }));
     } catch (error) {
       set({
         downloading: false,

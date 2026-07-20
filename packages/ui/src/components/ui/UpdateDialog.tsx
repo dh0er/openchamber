@@ -6,6 +6,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
+import { SourceUpdatePanel } from '@/components/ui/SourceUpdatePanel';
 import { SimpleMarkdownRenderer } from '@/components/chat/MarkdownRenderer';
 import { Icon } from "@/components/icon/Icon";
 import { cn } from '@/lib/utils';
@@ -217,6 +218,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
 
   const isWebRuntime = runtimeType === 'web';
   const isMobileRuntime = runtimeType === 'mobile';
+  const isSourceUpdate = runtimeType === 'desktop' && info?.updateKind === 'source-rebase';
   const updateCommand = info?.updateCommand || 'openchamber update';
 
   // Reset state when dialog closes
@@ -314,14 +316,20 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
           <DialogTitle className="flex items-center gap-2.5">
             <Icon name="download-cloud" className="h-5 w-5 text-[var(--primary-base)]" />
             <span className="text-lg font-semibold text-foreground">
-              {webUpdateState === 'restarting' || webUpdateState === 'reconnecting'
-                ? t('updateDialog.header.updating')
-                : t('updateDialog.header.updateAvailable')}
+              {isSourceUpdate
+                ? (downloading
+                  ? t('updateDialog.source.header.preparing')
+                  : downloaded
+                    ? t('updateDialog.source.header.ready')
+                    : t('updateDialog.source.header.updateAvailable'))
+                : webUpdateState === 'restarting' || webUpdateState === 'reconnecting'
+                  ? t('updateDialog.header.updating')
+                  : t('updateDialog.header.updateAvailable')}
             </span>
           </DialogTitle>
 
           {/* Version Diff */}
-          {(info?.currentVersion || info?.version) && (
+          {!isSourceUpdate && (info?.currentVersion || info?.version) && (
             <div className="flex items-center gap-2 font-mono text-sm ml-3">
               {info?.currentVersion && (
                 <span className="text-muted-foreground">{info.currentVersion}</span>
@@ -338,6 +346,17 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
 
         {/* Content Body */}
         <div className="space-y-2">
+          {isSourceUpdate && info && (
+            <SourceUpdatePanel
+              info={info}
+              downloading={downloading}
+              downloaded={downloaded}
+              progress={progress}
+              error={error}
+              onDownload={onDownload}
+              onRestart={onRestart}
+            />
+          )}
 
           {/* Web update progress */}
           {isWebRuntime && isWebUpdating && (
@@ -357,7 +376,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
           )}
 
           {/* Changelog Rendering */}
-          {changelog && !isWebUpdating && (
+          {!isSourceUpdate && changelog && !isWebUpdating && (
             <div className="rounded-lg border border-[var(--surface-subtle)] bg-[var(--surface-elevated)]/20 overflow-hidden">
               <ScrollableOverlay
                 className="max-h-[400px] p-0"
@@ -444,7 +463,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
           )}
 
           {/* Desktop progress bar */}
-          {!isWebRuntime && !isMobileRuntime && downloading && (
+          {!isSourceUpdate && !isWebRuntime && !isMobileRuntime && downloading && (
             <div className="space-y-2 mt-4">
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">{t('updateDialog.status.downloadingPayload')}</span>
@@ -460,7 +479,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
           )}
 
           {/* Error display */}
-          {(error || webError) && (
+          {!isSourceUpdate && (error || webError) && (
             <div className="p-3 mt-4 bg-[var(--status-error-background)] border border-[var(--status-error-border)] rounded-lg">
               <p className="text-sm text-[var(--status-error)]">{error || webError}</p>
             </div>
@@ -468,18 +487,19 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
         </div>
 
         {/* Action Footer */}
-        <div className="mt-4 flex items-center justify-between gap-4">
-          <a
-            href={releaseUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors shrink-0"
-          >
-            <Icon name="external-link" className="h-4 w-4" />
-            GitHub
-          </a>
+        {!isSourceUpdate && (
+          <div className="mt-4 flex items-center justify-between gap-4">
+            <a
+              href={releaseUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors shrink-0"
+            >
+              <Icon name="external-link" className="h-4 w-4" />
+              GitHub
+            </a>
 
-          <div className="flex-1 flex justify-end">
+            <div className="flex-1 flex justify-end">
             {/* Desktop Buttons */}
             {!isWebRuntime && !isMobileRuntime && !downloaded && !downloading && (
               <button
@@ -541,8 +561,9 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
                 {t('updateDialog.status.updating')}
               </button>
             )}
+            </div>
           </div>
-        </div>
+        )}
       </DialogContent>
     </Dialog>
   );
