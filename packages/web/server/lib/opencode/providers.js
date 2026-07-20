@@ -94,3 +94,21 @@ export {
   getProviderSources,
   removeProviderConfig,
 };
+
+export {
+  MANAGED_PROVIDER_INSTANCE_MARKER,
+  OPENAI_COMPATIBLE_PROVIDER_ID,
+  OPENAI_COMPATIBLE_PROVIDER_NPM,
+  ProviderInstanceError,
+  parseManagedProviderInstanceId,
+  validateProviderInstanceCreateInput,
+  validateProviderInstanceUpdateInput,
+  parseOpenAICompatibleModelCatalog,
+  buildOpenAICompatibleProviderConfig,
+  findSourceProvider,
+  mapProviderModelToConfig,
+  buildProviderInstanceConfig,
+  createProviderInstance,
+  updateProviderInstance,
+  getProviderConnectionMetadata,
+} from './provider-instances.js';

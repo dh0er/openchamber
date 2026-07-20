@@ -3,8 +3,10 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { randomUUID } from 'crypto';
-import { removeProviderConfig, getProviderSources } from './opencodeConfig';
-import { getProviderAuth, removeProviderAuth } from './opencodeAuth';
+import {
+  handleProviderInstanceBridgeMessage,
+  type ProviderInstanceRuntimeOverrides,
+} from './provider-instance-bridge-runtime';
 import { fetchQuotaForProvider, listConfiguredQuotaProviders } from './quotaProviders';
 import { fetchOpenCodeGoUsage } from './opencodeGoQuota';
 import { credentialStatus, deleteCredential, importCursorCredential, normalizeCredential, readCredential, validateCredential, writeCredential, type ManagedProvider } from './quotaCredentials';
@@ -22,6 +24,7 @@ type SystemRuntimeDeps = {
   fetchModelsMetadata: () => Promise<unknown>;
   updateCheckUrl: string;
   clientReloadDelayMs: number;
+  providerRuntime?: ProviderInstanceRuntimeOverrides;
 };
 
 const NOTIFICATION_CLAIM_TTL_MS = 10_000;
@@ -210,12 +213,18 @@ const reconstructOriginalContentFromPatch = (modifiedContent: string, patch: str
 
 const fetchFreeZenModels = async (): Promise<Array<{ id: string; owned_by?: string }>> => [];
 
+
 export async function handleSystemBridgeMessage(
   message: BridgeMessageInput,
   ctx: BridgeContext | undefined,
   deps: SystemRuntimeDeps,
 ): Promise<BridgeResponse | null> {
   const { id, type, payload } = message;
+  const providerResponse = await handleProviderInstanceBridgeMessage(message, ctx, {
+    clientReloadDelayMs: deps.clientReloadDelayMs,
+    providerRuntime: deps.providerRuntime,
+  });
+  if (providerResponse) return providerResponse;
 
   switch (type) {
     case 'api:opencode/directory': {
@@ -404,74 +413,6 @@ export async function handleSystemBridgeMessage(
       }
     }
 
-    case 'api:provider/auth:delete': {
-      const { providerId, scope, directory } = (payload || {}) as { providerId?: string; scope?: string; directory?: string };
-      if (!providerId) {
-        return { id, type, success: false, error: 'Provider ID is required' };
-      }
-      const normalizedScope = typeof scope === 'string' ? scope : 'auth';
-      const workingDirectory = typeof directory === 'string' && directory.trim().length > 0
-        ? directory.trim()
-        : ctx?.manager?.getWorkingDirectory();
-      try {
-        let removed = false;
-        if (normalizedScope === 'auth') {
-          removed = removeProviderAuth(providerId);
-        } else if (normalizedScope === 'user' || normalizedScope === 'project' || normalizedScope === 'custom') {
-          removed = removeProviderConfig(providerId, workingDirectory, normalizedScope);
-        } else if (normalizedScope === 'all') {
-          const authRemoved = removeProviderAuth(providerId);
-          const userRemoved = removeProviderConfig(providerId, workingDirectory, 'user');
-          const projectRemoved = workingDirectory
-            ? removeProviderConfig(providerId, workingDirectory, 'project')
-            : false;
-          const customRemoved = removeProviderConfig(providerId, workingDirectory, 'custom');
-          removed = authRemoved || userRemoved || projectRemoved || customRemoved;
-        } else {
-          return { id, type, success: false, error: 'Invalid scope' };
-        }
-
-        if (removed) {
-          await ctx?.manager?.restart();
-        }
-        return {
-          id,
-          type,
-          success: true,
-          data: {
-            success: true,
-            removed,
-            requiresReload: removed,
-            message: removed
-              ? `Provider ${providerId} disconnected successfully. Reloading interface…`
-              : `Provider ${providerId} was not configured.`,
-            reloadDelayMs: removed ? deps.clientReloadDelayMs : undefined,
-          },
-        };
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        return { id, type, success: false, error: errorMessage };
-      }
-    }
-
-    case 'api:provider/source:get': {
-      const { providerId, directory } = (payload || {}) as { providerId?: string; directory?: string };
-      if (!providerId) {
-        return { id, type, success: false, error: 'Provider ID is required' };
-      }
-      try {
-        const workingDirectory = typeof directory === 'string' && directory.trim().length > 0
-          ? directory.trim()
-          : ctx?.manager?.getWorkingDirectory();
-        const sources = getProviderSources(providerId, workingDirectory);
-        const auth = getProviderAuth(providerId);
-        sources.auth.exists = Boolean(auth);
-        return { id, type, success: true, data: { providerId, sources } };
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        return { id, type, success: false, error: errorMessage };
-      }
-    }
 
     case 'api:quota:providers': {
       try {

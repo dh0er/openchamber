@@ -1024,9 +1024,17 @@ export const registerSettingsUtilityRoutes = (app, dependencies) => {
     try {
       console.log('[Server] Manual configuration reload requested');
 
-      await refreshOpenCodeAfterConfigChange('manual configuration reload');
+      const refreshResult = await refreshOpenCodeAfterConfigChange('manual configuration reload');
 
-      res.json({
+      if (refreshResult?.external === true || refreshResult?.reloaded === false) {
+        return res.status(409).json({
+          success: false,
+          requiresManualRestart: true,
+          error: 'Configuration was saved, but the external OpenCode server must be restarted manually and share this OpenChamber configuration home.',
+        });
+      }
+
+      return res.json({
         success: true,
         requiresReload: true,
         message: 'Configuration reloaded successfully. Refreshing interface…',
@@ -1046,12 +1054,22 @@ export const registerCommonRequestMiddleware = (app, dependencies) => {
   const { express, verboseRequestLogs = false } = dependencies;
 
   app.use((req, res, next) => {
+    const isProviderInstanceMutation = (
+      req.method === 'POST'
+      && req.path === '/api/provider/instances'
+    ) || (
+      req.method === 'PUT'
+      && /^\/api\/provider\/[^/]+\/instance$/.test(req.path)
+    );
+
     if (req.path.startsWith('/api/behavior')) {
       const contentLength = parseInt(req.headers['content-length'] || '0', 10);
       if (contentLength > 1024 * 1024) {
         return res.status(413).json({ error: 'Content exceeds maximum size of 1048576 bytes' });
       }
       express.json({ limit: '1mb' })(req, res, next);
+    } else if (isProviderInstanceMutation) {
+      express.json({ limit: '64kb' })(req, res, next);
     } else if (
       req.path.startsWith('/api/config/agents') ||
       req.path.startsWith('/api/config/commands') ||

@@ -1,10 +1,15 @@
 import React from 'react';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 import { SettingsPageLayout } from '@/components/sections/shared/SettingsPageLayout';
-import { SettingsSection, SETTINGS_CUSTOM_TRIGGER_CLASS } from '@/components/sections/shared/SettingsSection';
+import {
+  SettingsSection,
+  SettingsTwoColumn,
+  SETTINGS_CUSTOM_TRIGGER_CLASS,
+} from '@/components/sections/shared/SettingsSection';
 import { SettingsInfoHint } from '@/components/sections/shared/SettingsInfoHint';
 import { ProviderLogo } from '@/components/ui/ProviderLogo';
 import { useConfigStore } from '@/stores/useConfigStore';
+import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -25,7 +30,31 @@ import type { ModelMetadata } from '@/types';
 import { getCurrentIntlLocale, useI18n } from '@/lib/i18n';
 import { runtimeFetch } from '@/lib/runtime-fetch';
 import { opencodeClient } from '@/lib/opencode/client';
-import { shouldLoadAvailableProviders } from './providerAvailability';
+import {
+  createDefaultProviderProxy,
+  getProviderSourceId,
+  getProviderSubscriptionState,
+  getSelectableProviderTemplates,
+  getSuggestedProviderInstanceName,
+  isManagedProviderInstanceId,
+  isOpenAICompatibleModelDiscoveryFailure,
+  isOpenAICompatibleProviderId,
+  isProviderBaseUrlRequired,
+  isValidProviderBaseUrl,
+  isValidProviderProxyUrl,
+  normalizeProviderProxy,
+  shouldLoadAvailableProviders,
+  toProviderProxyPayload,
+  type ProviderProxySettings,
+} from './providerAvailability';
+import { ProviderConnectionForm, ProviderIdentityFields } from './ProviderConnectionForm';
+import {
+  getProviderBaseUrl,
+  resolveAuthMethodIndex,
+  type ProviderConnectionMetadata,
+  type ProviderConnectionValues,
+  type ProviderMetadataStatus,
+} from './providerInstanceData';
 
 const formatCompactNumber = (value: number) => new Intl.NumberFormat(getCurrentIntlLocale(), {
   notation: 'compact',
@@ -46,6 +75,11 @@ const formatTokens = (value?: number | null) => {
 };
 
 const ADD_PROVIDER_ID = '__add_provider__';
+
+const getCurrentProviderDirectory = (): string | null => {
+  const directory = opencodeClient.getDirectory();
+  return typeof directory === 'string' && directory.trim() ? directory.trim() : null;
+};
 
 interface AuthMethod {
   type?: string;
@@ -151,6 +185,7 @@ export const ProvidersPage: React.FC = () => {
   const selectedProviderId = useConfigStore((state) => state.selectedProviderId);
   const setSelectedProvider = useConfigStore((state) => state.setSelectedProvider);
   const getModelMetadata = useConfigStore((state) => state.getModelMetadata);
+  const activeProjectId = useProjectsStore((state) => state.activeProjectId);
   const hiddenModels = useUIStore((state) => state.hiddenModels);
   const toggleHiddenModel = useUIStore((state) => state.toggleHiddenModel);
   const hideAllModels = useUIStore((state) => state.hideAllModels);
@@ -171,8 +206,22 @@ export const ProvidersPage: React.FC = () => {
   const [providerSearchQuery, setProviderSearchQuery] = React.useState('');
   const [providerDropdownOpen, setProviderDropdownOpen] = React.useState(false);
   const [providerSources, setProviderSources] = React.useState<Record<string, ProviderSources>>({});
+  const [providerConnections, setProviderConnections] = React.useState<Record<string, ProviderConnectionMetadata>>({});
+  const [providerMetadataStatus, setProviderMetadataStatus] = React.useState<Record<string, ProviderMetadataStatus>>({});
   const [showAuthPanel, setShowAuthPanel] = React.useState(false);
+  const [candidateProviderName, setCandidateProviderName] = React.useState('');
+  const [candidateBaseUrl, setCandidateBaseUrl] = React.useState('');
+  const [candidateProxy, setCandidateProxy] = React.useState<ProviderProxySettings>(createDefaultProviderProxy);
+  const [candidateSubscriptionName, setCandidateSubscriptionName] = React.useState('');
+  const [candidateSubscriptionBaseUrl, setCandidateSubscriptionBaseUrl] = React.useState('');
+  const [connectionInputs, setConnectionInputs] = React.useState<Record<string, ProviderConnectionValues>>({});
   const isAddMode = selectedProviderId === ADD_PROVIDER_ID;
+  const providerDirectory = React.useMemo(() => {
+    // The directory lives in the runtime-aware client; the project id makes
+    // this snapshot react to Settings project switches.
+    void activeProjectId;
+    return getCurrentProviderDirectory();
+  }, [activeProjectId]);
 
   React.useEffect(() => {
     if (!selectedProviderId && providers.length > 0) {
@@ -181,10 +230,6 @@ export const ProvidersPage: React.FC = () => {
   }, [providers, selectedProviderId, setSelectedProvider]);
 
   React.useEffect(() => {
-    if (!isAddMode) {
-      return;
-    }
-
     let isMounted = true;
 
     const loadAuthMethods = async () => {
@@ -212,7 +257,7 @@ export const ProvidersPage: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, [isAddMode, t]);
+  }, [t]);
 
   React.useEffect(() => {
     if (!shouldLoadAvailableProviders(isAddMode)) {
@@ -249,32 +294,16 @@ export const ProvidersPage: React.FC = () => {
     };
   }, [isAddMode, t]);
 
-  const connectedProviderIds = React.useMemo(
-    () => new Set(providers.map((provider) => provider.id)),
-    [providers]
-  );
-
-  const unconnectedProviders = React.useMemo(
+  const selectableProviders = React.useMemo(
     () =>
-      availableProviders
-        .filter((provider) => !connectedProviderIds.has(provider.id))
+      getSelectableProviderTemplates(availableProviders)
         .sort((a, b) => {
           const labelA = (a.name || a.id).toLowerCase();
           const labelB = (b.name || b.id).toLowerCase();
           return labelA.localeCompare(labelB);
         }),
-    [availableProviders, connectedProviderIds]
+    [availableProviders]
   );
-
-  React.useEffect(() => {
-    if (selectedProviderId !== ADD_PROVIDER_ID) {
-      return;
-    }
-
-    if (candidateProviderId && !unconnectedProviders.some((provider) => provider.id === candidateProviderId)) {
-      setCandidateProviderId('');
-    }
-  }, [selectedProviderId, candidateProviderId, unconnectedProviders]);
 
   React.useEffect(() => {
     if (selectedProviderId === ADD_PROVIDER_ID) {
@@ -286,19 +315,45 @@ export const ProvidersPage: React.FC = () => {
   }, [selectedProviderId, t]);
 
   React.useEffect(() => {
-    if (!selectedProviderId || selectedProviderId === ADD_PROVIDER_ID) {
+    if (isAddMode) return;
+    setCandidateProviderId('');
+    setCandidateProviderName('');
+    setCandidateBaseUrl('');
+    setCandidateProxy(createDefaultProviderProxy());
+    setCandidateSubscriptionName('');
+    setCandidateSubscriptionBaseUrl('');
+    setProviderSearchQuery('');
+  }, [isAddMode]);
+
+  React.useEffect(() => {
+    // API keys are write-only input. Never retain an unsaved credential when
+    // the user changes provider context or closes the add-provider flow.
+    setApiKeyInputs({});
+  }, [candidateProviderId, selectedProviderId]);
+
+  const providerMetadataId = isAddMode ? candidateProviderId : selectedProviderId;
+
+  React.useEffect(() => {
+    if (!providerMetadataId || providerMetadataId === ADD_PROVIDER_ID) {
+      return;
+    }
+
+    if (isAddMode && isOpenAICompatibleProviderId(providerMetadataId)) {
+      setProviderMetadataStatus((previous) => ({ ...previous, [providerMetadataId]: 'loaded' }));
       return;
     }
 
     let cancelled = false;
 
     const loadSources = async () => {
+      setProviderMetadataStatus((previous) => ({ ...previous, [providerMetadataId]: 'loading' }));
       try {
         // OpenChamber-only metadata endpoint: the SDK exposes provider data but
         // not local auth/source-file provenance used by this settings UI.
-        const response = await runtimeFetch(`/api/provider/${encodeURIComponent(selectedProviderId)}/source`, {
+        const response = await runtimeFetch(`/api/provider/${encodeURIComponent(providerMetadataId)}/source`, {
           method: 'GET',
           headers: { Accept: 'application/json' },
+          ...(providerDirectory ? { query: { directory: providerDirectory } } : {}),
         });
 
         const payload = await response.json().catch(() => null);
@@ -307,15 +362,54 @@ export const ProvidersPage: React.FC = () => {
         }
 
         const sources = (payload?.sources ?? payload?.data?.sources) as ProviderSources | undefined;
-        if (!cancelled && sources) {
-          setProviderSources((prev) => ({
-            ...prev,
-            [selectedProviderId]: sources,
-          }));
+        const connectionValue = payload?.connection ?? payload?.data?.connection;
+        const connection: ProviderConnectionMetadata | undefined = isRecord(connectionValue)
+          ? {
+              sourceProviderId: typeof connectionValue.sourceProviderId === 'string' ? connectionValue.sourceProviderId : undefined,
+              name: typeof connectionValue.name === 'string' ? connectionValue.name : null,
+              baseURL: typeof connectionValue.baseURL === 'string' ? connectionValue.baseURL : null,
+              proxy: isManagedProviderInstanceId(providerMetadataId)
+                ? normalizeProviderProxy(connectionValue.proxy)
+                : createDefaultProviderProxy(),
+              managed: connectionValue.managed === true,
+              authType: typeof connectionValue.authType === 'string' ? connectionValue.authType : null,
+            }
+          : undefined;
+        if (!cancelled) {
+          if (sources) {
+            setProviderSources((prev) => ({
+              ...prev,
+              [providerMetadataId]: sources,
+            }));
+          }
+          if (connection) {
+            setProviderConnections((prev) => ({
+              ...prev,
+              [providerMetadataId]: connection,
+            }));
+
+            if (isAddMode) {
+              const provider = availableProviders.find((entry) => entry.id === providerMetadataId);
+              setCandidateSubscriptionName(connection.name || provider?.name || providerMetadataId);
+              setCandidateSubscriptionBaseUrl(connection.baseURL || '');
+            } else {
+              const provider = providers.find((entry) => entry.id === providerMetadataId);
+              setConnectionInputs((previous) => ({
+                ...previous,
+                [providerMetadataId]: {
+                  name: connection.name || provider?.name || providerMetadataId,
+                  baseUrl: connection.baseURL || '',
+                  proxy: connection.proxy,
+                },
+              }));
+            }
+          }
+          setProviderMetadataStatus((previous) => ({ ...previous, [providerMetadataId]: 'loaded' }));
         }
       } catch (error) {
         if (!cancelled) {
           console.error('Failed to load provider sources:', error);
+          setProviderMetadataStatus((previous) => ({ ...previous, [providerMetadataId]: 'error' }));
         }
       }
     };
@@ -325,43 +419,239 @@ export const ProvidersPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [selectedProviderId, t]);
+  }, [availableProviders, isAddMode, providerDirectory, providerMetadataId, providers, t]);
 
   const selectedProvider = providers.find((provider) => provider.id === selectedProviderId);
   const selectedSources = selectedProviderId ? providerSources[selectedProviderId] : undefined;
 
-  const handleSaveApiKey = async (providerId: string) => {
-    const apiKey = apiKeyInputs[providerId]?.trim() ?? '';
-    if (!apiKey) {
-      toast.error(t('settings.providers.page.toast.apiKeyRequired'));
-      return;
-    }
+  React.useEffect(() => {
+    if (!selectedProvider) return;
 
-    const busyKey = `api:${providerId}`;
+    setConnectionInputs((previous) => {
+      if (previous[selectedProvider.id]) return previous;
+      return {
+        ...previous,
+        [selectedProvider.id]: {
+          name: selectedProvider.name || selectedProvider.id,
+          baseUrl: getProviderBaseUrl(selectedProvider),
+          proxy: createDefaultProviderProxy(),
+        },
+      };
+    });
+  }, [selectedProvider]);
+
+  const validateConnectionValues = (
+    providerId: string,
+    name: string,
+    baseUrl: string,
+    proxy: ProviderProxySettings,
+    apiKey?: string,
+  ) => {
+    if (!name.trim()) {
+      toast.error(t('settings.providers.page.toast.instanceNameRequired'));
+      return false;
+    }
+    if (isProviderBaseUrlRequired(providerId) && !baseUrl.trim()) {
+      toast.error(t('settings.providers.page.toast.baseUrlRequired'));
+      return false;
+    }
+    if (!isValidProviderBaseUrl(baseUrl)) {
+      toast.error(t('settings.providers.page.toast.baseUrlInvalid'));
+      return false;
+    }
+    if (proxy.mode === 'manual' && !proxy.url.trim()) {
+      toast.error(t('settings.providers.page.toast.proxyUrlRequired'));
+      return false;
+    }
+    if (proxy.mode === 'manual' && !isValidProviderProxyUrl(proxy.url)) {
+      toast.error(t('settings.providers.page.toast.proxyUrlInvalid'));
+      return false;
+    }
+    if (apiKey !== undefined && !apiKey.trim()) {
+      toast.error(t('settings.providers.page.toast.apiKeyRequired'));
+      return false;
+    }
+    return true;
+  };
+
+  const parseProviderInstanceResponse = async (response: Response, providerId: string) => {
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      if (isOpenAICompatibleModelDiscoveryFailure(providerId, response.status)) {
+        throw new Error(t('settings.providers.page.toast.modelsLoadFailed'));
+      }
+      throw new Error(t('settings.providers.page.toast.connectionSaveFailed'));
+    }
+    return payload;
+  };
+
+  const reloadProvidersAfterMutation = async () => {
+    try {
+      await reloadOpenCodeConfiguration({ scopes: ['providers'], mode: 'active' });
+      return true;
+    } catch (error) {
+      console.error('OpenCode provider reload failed:', error);
+      return false;
+    }
+  };
+
+  const saveProviderConnectionConfig = async (
+    providerId: string,
+    values: ProviderConnectionValues & { apiKey?: string; credentialMode?: 'oauth' },
+  ) => {
+    const directory = getCurrentProviderDirectory();
+    const response = await runtimeFetch(`/api/provider/${encodeURIComponent(providerId)}/instance`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      ...(directory ? { query: { directory } } : {}),
+      body: JSON.stringify({
+        name: values.name.trim(),
+        baseURL: values.baseUrl.trim(),
+        ...(isManagedProviderInstanceId(providerId)
+          ? { proxy: toProviderProxyPayload(values.proxy) }
+          : {}),
+        ...(values.apiKey?.trim() ? { apiKey: values.apiKey.trim() } : {}),
+        ...(values.credentialMode ? { credentialMode: values.credentialMode } : {}),
+      }),
+    });
+    return parseProviderInstanceResponse(response, providerId);
+  };
+
+  const handleCreateApiKeyInstance = async (sourceProviderId: string) => {
+    const apiKey = apiKeyInputs[sourceProviderId]?.trim() ?? '';
+    if (!validateConnectionValues(
+      sourceProviderId,
+      candidateProviderName,
+      candidateBaseUrl,
+      candidateProxy,
+      apiKey,
+    )) return;
+
+    const busyKey = `api:${sourceProviderId}`;
     setAuthBusyKey(busyKey);
 
     try {
-      const result = await opencodeClient.getSdkClient().auth.set({
-        providerID: providerId,
-        auth: { type: 'api', key: apiKey },
+      const directory = getCurrentProviderDirectory();
+      const response = await runtimeFetch('/api/provider/instances', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        ...(directory ? { query: { directory } } : {}),
+        body: JSON.stringify({
+          sourceProviderId,
+          name: candidateProviderName.trim(),
+          baseURL: candidateBaseUrl.trim(),
+          proxy: toProviderProxyPayload(candidateProxy),
+          apiKey,
+        }),
       });
-      if (result.error) {
-        throw new Error(t('settings.providers.page.toast.apiKeySaveFailed'));
+      const payload = await parseProviderInstanceResponse(response, sourceProviderId);
+      const instanceId = payload?.instance?.id
+        ?? payload?.instance?.providerId
+        ?? payload?.instanceId
+        ?? payload?.id;
+      if (typeof instanceId !== 'string' || !instanceId) {
+        throw new Error(t('settings.providers.page.toast.connectionSaveFailed'));
       }
 
-      toast.success(t('settings.providers.page.toast.apiKeySaved'));
-      setApiKeyInputs((prev) => ({ ...prev, [providerId]: '' }));
-      await reloadOpenCodeConfiguration({ scopes: ["providers"], mode: "active" });
-      setSelectedProvider(providerId);
+      setApiKeyInputs((previous) => ({ ...previous, [sourceProviderId]: '' }));
+      const reloaded = await reloadProvidersAfterMutation();
+      setSelectedProvider(instanceId);
+      if (reloaded) {
+        toast.success(t('settings.providers.page.toast.instanceConnected'));
+      } else {
+        toast.warning(t('settings.providers.page.toast.savedReloadFailed'));
+      }
     } catch (error) {
-      console.error('Failed to save API key:', error);
-      toast.error(t('settings.providers.page.toast.apiKeySaveFailed'));
+      console.error('Failed to create provider instance:', error);
+      toast.error(error instanceof Error ? error.message : t('settings.providers.page.toast.connectionSaveFailed'));
     } finally {
       setAuthBusyKey(null);
     }
   };
 
+  const handleSaveProviderConnection = async (providerId: string) => {
+    const values = connectionInputs[providerId];
+    if (
+      providerMetadataStatus[providerId] !== 'loaded'
+      || !providerConnections[providerId]
+      || !values
+    ) {
+      toast.error(t('settings.providers.page.toast.providerSourcesLoadFailed'));
+      return;
+    }
+    const apiKey = apiKeyInputs[providerId]?.trim() ?? '';
+    if (!validateConnectionValues(providerId, values.name, values.baseUrl, values.proxy)) return;
+
+    const busyKey = `api:${providerId}`;
+    setAuthBusyKey(busyKey);
+
+    try {
+      const payload = await saveProviderConnectionConfig(providerId, {
+        ...values,
+        ...(apiKey ? { apiKey } : {}),
+      });
+      const savedName = typeof payload?.instance?.name === 'string' ? payload.instance.name : values.name.trim();
+      const savedBaseUrl = typeof payload?.instance?.baseURL === 'string'
+        ? payload.instance.baseURL
+        : payload?.instance?.baseURL === null
+          ? ''
+          : values.baseUrl.trim();
+      const savedProxy = payload?.instance && Object.hasOwn(payload.instance, 'proxy')
+        ? normalizeProviderProxy(payload.instance.proxy)
+        : values.proxy;
+      setConnectionInputs((previous) => ({
+        ...previous,
+        [providerId]: { name: savedName, baseUrl: savedBaseUrl, proxy: savedProxy },
+      }));
+      setApiKeyInputs((previous) => ({ ...previous, [providerId]: '' }));
+      setProviderConnections((previous) => ({
+        ...previous,
+        [providerId]: {
+          ...previous[providerId],
+          proxy: savedProxy,
+          ...(apiKey ? { authType: 'api' } : {}),
+        },
+      }));
+      const reloaded = await reloadProvidersAfterMutation();
+      setSelectedProvider(providerId);
+      if (reloaded) {
+        toast.success(t('settings.providers.page.toast.connectionSaved'));
+      } else {
+        toast.warning(t('settings.providers.page.toast.savedReloadFailed'));
+      }
+    } catch (error) {
+      console.error('Failed to save provider connection:', error);
+      toast.error(error instanceof Error ? error.message : t('settings.providers.page.toast.connectionSaveFailed'));
+    } finally {
+      setAuthBusyKey(null);
+    }
+  };
+
+  const getConnectionValuesForProvider = (providerId: string) => {
+    if (isAddMode && candidateProviderId === providerId) {
+      return {
+        name: candidateSubscriptionName,
+        baseUrl: candidateSubscriptionBaseUrl,
+        proxy: createDefaultProviderProxy(),
+      };
+    }
+
+    return connectionInputs[providerId] ?? {
+      name: providers.find((provider) => provider.id === providerId)?.name || providerId,
+      baseUrl: getProviderBaseUrl(providers.find((provider) => provider.id === providerId)),
+      proxy: createDefaultProviderProxy(),
+    };
+  };
+
   const handleOAuthStart = async (providerId: string, methodIndex: number) => {
+    const connectionValues = getConnectionValuesForProvider(providerId);
+    if (!validateConnectionValues(
+      providerId,
+      connectionValues.name,
+      connectionValues.baseUrl,
+      connectionValues.proxy,
+    )) return;
+
     const busyKey = `oauth:${providerId}:${methodIndex}`;
     setAuthBusyKey(busyKey);
 
@@ -425,6 +715,7 @@ export const ProvidersPage: React.FC = () => {
 
     const busyKey = `oauth-complete:${providerId}:${methodIndex}`;
     setAuthBusyKey(busyKey);
+    let oauthConnected = false;
 
     try {
       const requestBody: { method: number; code?: string } = { method: methodIndex };
@@ -441,14 +732,36 @@ export const ProvidersPage: React.FC = () => {
         throw new Error(t('settings.providers.page.toast.oauthCompleteFailed'));
       }
 
-      toast.success(t('settings.providers.page.toast.oauthCompleted'));
+      oauthConnected = true;
+      const connectionValues = getConnectionValuesForProvider(providerId);
+      setProviderConnections((prev) => ({
+        ...prev,
+        [providerId]: {
+          ...prev[providerId],
+          proxy: connectionValues.proxy,
+          authType: 'oauth',
+        },
+      }));
+      setApiKeyInputs((prev) => ({ ...prev, [providerId]: '' }));
       setOauthCodes((prev) => ({ ...prev, [codeKey]: '' }));
       setPendingOAuth(null);
-      await reloadOpenCodeConfiguration({ scopes: ["providers"], mode: "active" });
+      await saveProviderConnectionConfig(providerId, { ...connectionValues, credentialMode: 'oauth' });
+      const reloaded = await reloadProvidersAfterMutation();
       setSelectedProvider(providerId);
+      if (reloaded) {
+        toast.success(t('settings.providers.page.toast.oauthCompleted'));
+      } else {
+        toast.warning(t('settings.providers.page.toast.savedReloadFailed'));
+      }
     } catch (error) {
       console.error('Failed to complete OAuth flow:', error);
-      toast.error(t('settings.providers.page.toast.oauthCompleteFailed'));
+      if (oauthConnected) {
+        await reloadProvidersAfterMutation();
+        setSelectedProvider(providerId);
+        toast.warning(t('settings.providers.page.toast.oauthConnectedSettingsSaveFailed'));
+      } else {
+        toast.error(t('settings.providers.page.toast.oauthCompleteFailed'));
+      }
     } finally {
       setAuthBusyKey(null);
     }
@@ -479,9 +792,11 @@ export const ProvidersPage: React.FC = () => {
     setAuthBusyKey(busyKey);
 
     try {
+      const directory = getCurrentProviderDirectory();
       const response = await runtimeFetch(`/api/provider/${encodeURIComponent(providerId)}/auth?scope=all`, {
         method: 'DELETE',
         headers: { Accept: 'application/json' },
+        ...(directory ? { query: { directory } } : {}),
       });
 
       const payload = await response.json().catch(() => null);
@@ -528,8 +843,8 @@ export const ProvidersPage: React.FC = () => {
                     <p className="typography-meta text-muted-foreground">{t('settings.providers.page.state.loading')}</p>
                   ) : availableError ? (
                     <p className="typography-meta text-muted-foreground">{availableError}</p>
-                  ) : unconnectedProviders.length === 0 ? (
-                    <p className="typography-meta text-muted-foreground">{t('settings.providers.page.connect.allProvidersConnected')}</p>
+                  ) : selectableProviders.length === 0 ? (
+                    <p className="typography-meta text-muted-foreground">{t('settings.providers.page.connect.noProvidersAvailable')}</p>
                   ) : (
                     <DropdownMenu open={providerDropdownOpen} onOpenChange={(open) => {
                       setProviderDropdownOpen(open);
@@ -544,7 +859,7 @@ export const ProvidersPage: React.FC = () => {
                             {candidateProviderId ? <ProviderLogo providerId={candidateProviderId} className="h-3.5 w-3.5 flex-shrink-0" /> : null}
                             <span className={cn("truncate typography-ui-label font-normal", candidateProviderId ? "text-foreground" : "text-muted-foreground")}>
                               {candidateProviderId
-                                ? (unconnectedProviders.find(p => p.id === candidateProviderId)?.name || candidateProviderId)
+                                ? (selectableProviders.find(p => p.id === candidateProviderId)?.name || candidateProviderId)
                                 : t('settings.providers.page.connect.selectProviderPlaceholder')}
                             </span>
                           </span>
@@ -573,7 +888,7 @@ export const ProvidersPage: React.FC = () => {
                         </div>
                         <ScrollableOverlay outerClassName="max-h-[240px]" className="p-1">
                           {(() => {
-                            const filtered = unconnectedProviders.filter(p => {
+                            const filtered = selectableProviders.filter(p => {
                               const query = providerSearchQuery.toLowerCase();
                               return (p.name || p.id).toLowerCase().includes(query) || p.id.toLowerCase().includes(query);
                             });
@@ -585,6 +900,18 @@ export const ProvidersPage: React.FC = () => {
                                 key={provider.id}
                                 onSelect={() => {
                                   setCandidateProviderId(provider.id);
+                                  setCandidateProviderName(getSuggestedProviderInstanceName(
+                                    provider,
+                                    providers.map((connectedProvider) => connectedProvider.id),
+                                  ));
+                                  setCandidateBaseUrl('');
+                                  setCandidateProxy(createDefaultProviderProxy());
+                                  setCandidateSubscriptionName(provider.name || provider.id);
+                                  setCandidateSubscriptionBaseUrl('');
+                                  setProviderMetadataStatus((previous) => ({
+                                    ...previous,
+                                    [provider.id]: 'loading',
+                                  }));
                                   setProviderDropdownOpen(false);
                                   setProviderSearchQuery('');
                                 }}
@@ -617,52 +944,87 @@ export const ProvidersPage: React.FC = () => {
                 <p className="typography-meta text-muted-foreground">{t('settings.providers.page.auth.loadingMethods')}</p>
               ) : (
                 <>
-                  <div className="py-1.5">
-                    <label className="typography-ui-label text-foreground flex items-center gap-1.5">
-                      {t('settings.providers.page.auth.apiKeyLabel')}
-                      <SettingsInfoHint>{t('settings.providers.page.auth.apiKeyTooltip')}</SettingsInfoHint>
-                    </label>
-                    <div className="flex flex-col @xl:flex-row @xl:items-center gap-2 mt-1.5">
-                      <Input
-                        type="password"
-                        value={apiKeyInputs[candidateProviderId] ?? ''}
-                        onChange={(event) =>
-                          setApiKeyInputs((prev) => ({
-                            ...prev,
-                            [candidateProviderId]: event.target.value,
-                          }))
-                        }
-                        placeholder={t('settings.providers.page.auth.apiKeyPlaceholder')}
-                        className="flex-1 font-mono text-xs"
-                      />
-                      <Button
-                        size="xs"
-                        className="!font-normal shrink-0"
-                        onClick={() => handleSaveApiKey(candidateProviderId)}
-                        disabled={authBusyKey === `api:${candidateProviderId}`}
-                      >
-                        {authBusyKey === `api:${candidateProviderId}` ? t('settings.providers.page.actions.saving') : t('settings.providers.page.actions.saveKey')}
-                      </Button>
-                    </div>
-                  </div>
+                  <ProviderConnectionForm
+                    name={candidateProviderName}
+                    apiKey={apiKeyInputs[candidateProviderId] ?? ''}
+                    baseUrl={candidateBaseUrl}
+                    proxy={candidateProxy}
+                    baseUrlRequired={isProviderBaseUrlRequired(candidateProviderId)}
+                    apiKeyRequired
+                    busy={authBusyKey === `api:${candidateProviderId}`}
+                    onNameChange={setCandidateProviderName}
+                    onApiKeyChange={(value) => setApiKeyInputs((previous) => ({
+                      ...previous,
+                      [candidateProviderId]: value,
+                    }))}
+                    onBaseUrlChange={setCandidateBaseUrl}
+                    onProxyChange={setCandidateProxy}
+                    onSubmit={() => handleCreateApiKeyInstance(candidateProviderId)}
+                  />
 
                   {(() => {
                     const candidateAuthMethods = authMethodsByProvider[candidateProviderId] ?? [];
-                    const candidateOAuthMethods = candidateAuthMethods.filter(
-                      (method) => normalizeAuthType(method) === 'oauth'
-                    );
+                    const candidateOAuthMethods = candidateAuthMethods
+                      .map((method, arrayIndex) => ({
+                        method,
+                        methodIndex: resolveAuthMethodIndex(method, arrayIndex),
+                      }))
+                      .filter(({ method }) => normalizeAuthType(method) === 'oauth');
 
                     if (candidateOAuthMethods.length === 0) {
                       return null;
                     }
 
+                    const metadataStatus = providerMetadataStatus[candidateProviderId];
+                    const connection = providerConnections[candidateProviderId];
+                    if (!metadataStatus || metadataStatus === 'loading') {
+                      return (
+                        <p className="border-t border-[var(--surface-subtle)] pt-3 typography-meta text-muted-foreground">
+                          {t('settings.providers.page.state.loading')}
+                        </p>
+                      );
+                    }
+                    if (metadataStatus === 'error' || !connection) {
+                      return (
+                        <p className="border-t border-[var(--surface-subtle)] pt-3 typography-meta text-muted-foreground">
+                          {t('settings.providers.page.toast.providerSourcesLoadFailed')}
+                        </p>
+                      );
+                    }
+
+                    const subscriptionState = getProviderSubscriptionState(connection.authType);
+                    if (subscriptionState === 'connected') {
+                      return (
+                        <p className="border-t border-[var(--surface-subtle)] pt-3 typography-meta text-muted-foreground">
+                          {t('settings.providers.page.auth.subscriptionAlreadyConnected')}
+                        </p>
+                      );
+                    }
+
                     return (
                       <div className="space-y-4 border-t border-[var(--surface-subtle)] pt-2">
-                        {candidateOAuthMethods.map((method, index) => {
-                          const methodLabel = method.label || method.name || t('settings.providers.page.auth.oauthMethodFallback', { index: String(index + 1) });
-                          const codeKey = `${candidateProviderId}:${index}`;
+                        {subscriptionState === 'replaces-api-key' && (
+                          <p className="typography-meta text-muted-foreground">
+                            {t('settings.providers.page.auth.apiKeyWillBeReplacedBySubscription')}
+                          </p>
+                        )}
+                        <div className="typography-ui-label text-foreground">
+                          {t('settings.providers.page.auth.subscriptionConnection')}
+                        </div>
+                        <SettingsTwoColumn className="gap-y-5">
+                          <ProviderIdentityFields
+                            name={candidateSubscriptionName}
+                            baseUrl={candidateSubscriptionBaseUrl}
+                            showProxy={false}
+                            onNameChange={setCandidateSubscriptionName}
+                            onBaseUrlChange={setCandidateSubscriptionBaseUrl}
+                          />
+                        </SettingsTwoColumn>
+                        {candidateOAuthMethods.map(({ method, methodIndex }) => {
+                          const methodLabel = method.label || method.name || t('settings.providers.page.auth.oauthMethodFallback', { index: String(methodIndex + 1) });
+                          const codeKey = `${candidateProviderId}:${methodIndex}`;
                           const isPending =
-                            pendingOAuth?.providerId === candidateProviderId && pendingOAuth?.methodIndex === index;
+                            pendingOAuth?.providerId === candidateProviderId && pendingOAuth?.methodIndex === methodIndex;
 
                           return (
                             <div key={`${candidateProviderId}-${methodLabel}`} className="space-y-3">
@@ -679,8 +1041,8 @@ export const ProvidersPage: React.FC = () => {
                                   variant="outline"
                                   size="xs"
                                   className="!font-normal"
-                                  onClick={() => handleOAuthStart(candidateProviderId, index)}
-                                  disabled={authBusyKey === `oauth:${candidateProviderId}:${index}`}
+                                  onClick={() => handleOAuthStart(candidateProviderId, methodIndex)}
+                                  disabled={authBusyKey === `oauth:${candidateProviderId}:${methodIndex}`}
                                 >
                                   {t('settings.providers.page.actions.connect')}
                                 </Button>
@@ -725,10 +1087,10 @@ export const ProvidersPage: React.FC = () => {
                                   <Button
                                     size="xs"
                                     className="!font-normal"
-                                    onClick={() => handleOAuthComplete(candidateProviderId, index)}
-                                    disabled={authBusyKey === `oauth-complete:${candidateProviderId}:${index}`}
+                                    onClick={() => handleOAuthComplete(candidateProviderId, methodIndex)}
+                                    disabled={authBusyKey === `oauth-complete:${candidateProviderId}:${methodIndex}`}
                                   >
-                                    {authBusyKey === `oauth-complete:${candidateProviderId}:${index}` ? t('settings.providers.page.actions.saving') : t('settings.providers.page.actions.complete')}
+                                    {authBusyKey === `oauth-complete:${candidateProviderId}:${methodIndex}` ? t('settings.providers.page.actions.saving') : t('settings.providers.page.actions.complete')}
                                   </Button>
                                 </div>
                               )}
@@ -759,8 +1121,28 @@ export const ProvidersPage: React.FC = () => {
   }
 
   const providerModels = Array.isArray(selectedProvider.models) ? selectedProvider.models : [];
-  const providerAuthMethods = authMethodsByProvider[selectedProvider.id] ?? [];
-  const oauthAuthMethods = providerAuthMethods.filter((method) => normalizeAuthType(method) === 'oauth');
+  const selectedProviderSourceId = getProviderSourceId(selectedProvider.id);
+  const selectedProviderIsManaged = isManagedProviderInstanceId(selectedProvider.id);
+  const selectedSubscriptionState = getProviderSubscriptionState(
+    providerConnections[selectedProvider.id]?.authType,
+  );
+  const selectedMetadataStatus = providerMetadataStatus[selectedProvider.id];
+  const selectedMetadataReady = selectedMetadataStatus === 'loaded'
+    && Boolean(providerConnections[selectedProvider.id]);
+  const providerAuthMethods = selectedProviderIsManaged
+    ? []
+    : authMethodsByProvider[selectedProviderSourceId] ?? [];
+  const oauthAuthMethods = providerAuthMethods
+    .map((method, arrayIndex) => ({
+      method,
+      methodIndex: resolveAuthMethodIndex(method, arrayIndex),
+    }))
+    .filter(({ method }) => normalizeAuthType(method) === 'oauth');
+  const selectedConnectionInput = connectionInputs[selectedProvider.id] ?? {
+    name: selectedProvider.name || selectedProvider.id,
+    baseUrl: getProviderBaseUrl(selectedProvider),
+    proxy: createDefaultProviderProxy(),
+  };
 
   const filteredModels = providerModels.filter((model) => {
     const name = typeof model?.name === 'string' ? model.name : '';
@@ -802,42 +1184,55 @@ export const ProvidersPage: React.FC = () => {
               <div className="py-1.5 typography-meta text-muted-foreground">{t('settings.providers.page.auth.loadingMethods')}</div>
             ) : (
               <div className="space-y-4">
-                <div className="py-1.5">
-                  <label className="typography-ui-label text-foreground flex items-center gap-1.5">
-                    {t('settings.providers.page.auth.apiKeyLabel')}
-                    <SettingsInfoHint>{t('settings.providers.page.auth.apiKeyTooltip')}</SettingsInfoHint>
-                  </label>
-                  <div className="flex flex-col @xl:flex-row @xl:items-center gap-2 mt-1.5">
-                    <Input
-                      type="password"
-                      value={apiKeyInputs[selectedProvider.id] ?? ''}
-                      onChange={(event) =>
-                        setApiKeyInputs((prev) => ({
-                          ...prev,
-                          [selectedProvider.id]: event.target.value,
-                        }))
-                      }
-                      placeholder={t('settings.providers.page.auth.apiKeyPlaceholder')}
-                      className="flex-1 font-mono text-xs"
-                    />
-                    <Button
-                      size="xs"
-                      className="!font-normal shrink-0"
-                      onClick={() => handleSaveApiKey(selectedProvider.id)}
-                      disabled={authBusyKey === `api:${selectedProvider.id}`}
-                    >
-                      {authBusyKey === `api:${selectedProvider.id}` ? t('settings.providers.page.actions.saving') : t('settings.providers.page.actions.saveKey')}
-                    </Button>
-                  </div>
-                </div>
+                {!selectedMetadataReady ? (
+                  <p className="border-t border-[var(--surface-subtle)] pt-3 typography-meta text-muted-foreground">
+                    {selectedMetadataStatus === 'error'
+                      ? t('settings.providers.page.toast.providerSourcesLoadFailed')
+                      : t('settings.providers.page.state.loading')}
+                  </p>
+                ) : (
+                  <ProviderConnectionForm
+                    name={selectedConnectionInput.name}
+                    apiKey={apiKeyInputs[selectedProvider.id] ?? ''}
+                    baseUrl={selectedConnectionInput.baseUrl}
+                    proxy={selectedConnectionInput.proxy}
+                    baseUrlRequired={isProviderBaseUrlRequired(selectedProvider.id)}
+                    showProxy={selectedProviderIsManaged}
+                    apiKeyRequired={false}
+                    showApiKey={selectedProviderIsManaged || selectedSubscriptionState !== 'connected'}
+                    busy={authBusyKey === `api:${selectedProvider.id}`}
+                    onNameChange={(value) => setConnectionInputs((previous) => ({
+                      ...previous,
+                      [selectedProvider.id]: { ...selectedConnectionInput, name: value },
+                    }))}
+                    onApiKeyChange={(value) => setApiKeyInputs((previous) => ({
+                      ...previous,
+                      [selectedProvider.id]: value,
+                    }))}
+                    onBaseUrlChange={(value) => setConnectionInputs((previous) => ({
+                      ...previous,
+                      [selectedProvider.id]: { ...selectedConnectionInput, baseUrl: value },
+                    }))}
+                    onProxyChange={(value) => setConnectionInputs((previous) => ({
+                      ...previous,
+                      [selectedProvider.id]: { ...selectedConnectionInput, proxy: value },
+                    }))}
+                    onSubmit={() => handleSaveProviderConnection(selectedProvider.id)}
+                  />
+                )}
 
-                {oauthAuthMethods.length > 0 && (
+                {selectedMetadataReady && oauthAuthMethods.length > 0 && (
                   <div className="space-y-4 border-t border-[var(--surface-subtle)] pt-2">
-                    {oauthAuthMethods.map((method, index) => {
-                      const methodLabel = method.label || method.name || t('settings.providers.page.auth.oauthMethodFallback', { index: String(index + 1) });
-                      const codeKey = `${selectedProvider.id}:${index}`;
+                    {selectedSubscriptionState === 'replaces-api-key' && (
+                      <p className="typography-meta text-muted-foreground">
+                        {t('settings.providers.page.auth.apiKeyWillBeReplacedBySubscription')}
+                      </p>
+                    )}
+                    {oauthAuthMethods.map(({ method, methodIndex }) => {
+                      const methodLabel = method.label || method.name || t('settings.providers.page.auth.oauthMethodFallback', { index: String(methodIndex + 1) });
+                      const codeKey = `${selectedProvider.id}:${methodIndex}`;
                       const isPending =
-                        pendingOAuth?.providerId === selectedProvider.id && pendingOAuth?.methodIndex === index;
+                        pendingOAuth?.providerId === selectedProvider.id && pendingOAuth?.methodIndex === methodIndex;
 
                       return (
                         <div key={`${selectedProvider.id}-${methodLabel}`} className="space-y-3">
@@ -854,8 +1249,8 @@ export const ProvidersPage: React.FC = () => {
                               variant="outline"
                               size="xs"
                               className="!font-normal"
-                              onClick={() => handleOAuthStart(selectedProvider.id, index)}
-                              disabled={authBusyKey === `oauth:${selectedProvider.id}:${index}`}
+                              onClick={() => handleOAuthStart(selectedProvider.id, methodIndex)}
+                              disabled={authBusyKey === `oauth:${selectedProvider.id}:${methodIndex}`}
                             >
                               {t('settings.providers.page.actions.connect')}
                             </Button>
@@ -900,10 +1295,10 @@ export const ProvidersPage: React.FC = () => {
                               <Button
                                 size="xs"
                                 className="!font-normal"
-                                onClick={() => handleOAuthComplete(selectedProvider.id, index)}
-                                disabled={authBusyKey === `oauth-complete:${selectedProvider.id}:${index}`}
+                                onClick={() => handleOAuthComplete(selectedProvider.id, methodIndex)}
+                                disabled={authBusyKey === `oauth-complete:${selectedProvider.id}:${methodIndex}`}
                               >
-                                {authBusyKey === `oauth-complete:${selectedProvider.id}:${index}` ? t('settings.providers.page.actions.saving') : t('settings.providers.page.actions.complete')}
+                                {authBusyKey === `oauth-complete:${selectedProvider.id}:${methodIndex}` ? t('settings.providers.page.actions.saving') : t('settings.providers.page.actions.complete')}
                               </Button>
                             </div>
                           )}

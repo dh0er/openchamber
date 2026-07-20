@@ -2,11 +2,38 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { createTunnelAuth } from './tunnel-auth.js';
-import { registerAuthAndAccessRoutes, registerCommonRequestMiddleware, registerServerStatusRoutes } from './core-routes.js';
+import {
+  registerAuthAndAccessRoutes,
+  registerCommonRequestMiddleware,
+  registerServerStatusRoutes,
+  registerSettingsUtilityRoutes,
+} from './core-routes.js';
 
 describe('core-routes', () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('reports that an external OpenCode server needs a manual restart', async () => {
+    const app = express();
+    const refreshOpenCodeAfterConfigChange = vi.fn(async () => ({
+      reloaded: false,
+      external: true,
+    }));
+    registerSettingsUtilityRoutes(app, {
+      readCustomThemesFromDisk: vi.fn(),
+      refreshOpenCodeAfterConfigChange,
+      clientReloadDelayMs: 800,
+    });
+
+    const response = await request(app).post('/api/config/reload');
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      success: false,
+      requiresManualRestart: true,
+    });
+    expect(refreshOpenCodeAfterConfigChange).toHaveBeenCalledWith('manual configuration reload');
   });
 
   it('should call gracefulShutdown with exitProcess: true on /api/system/shutdown', async () => {
@@ -125,6 +152,46 @@ describe('core-routes', () => {
       .expect(200);
 
     expect(response.body).toEqual({ body: { content: 'Snippet body' } });
+  });
+
+  it('parses bounded JSON bodies only for explicit provider instance mutations', async () => {
+    const app = express();
+    registerCommonRequestMiddleware(app, { express });
+    app.post('/api/provider/instances', (req, res) => {
+      res.json({ body: req.body });
+    });
+    app.put('/api/provider/:providerId/instance', (req, res) => {
+      res.json({ body: req.body });
+    });
+    app.post('/api/provider/:providerId/oauth/authorize', (req, res) => {
+      res.json({ bodyWasParsed: req.body !== undefined });
+    });
+
+    const createResponse = await request(app)
+      .post('/api/provider/instances')
+      .send({ sourceProviderId: 'anthropic', name: 'Gateway', apiKey: 'test-key' })
+      .expect(200);
+    const updateResponse = await request(app)
+      .put('/api/provider/anthropic%3Aopenchamber%3Atest/instance')
+      .send({ name: 'Renamed gateway' })
+      .expect(200);
+    const proxyResponse = await request(app)
+      .post('/api/provider/anthropic/oauth/authorize')
+      .send({ method: 0 })
+      .expect(200);
+
+    expect(createResponse.body.body).toEqual({
+      sourceProviderId: 'anthropic',
+      name: 'Gateway',
+      apiKey: 'test-key',
+    });
+    expect(updateResponse.body.body).toEqual({ name: 'Renamed gateway' });
+    expect(proxyResponse.body).toEqual({ bodyWasParsed: false });
+
+    await request(app)
+      .post('/api/provider/instances')
+      .send({ apiKey: 'x'.repeat(70 * 1024) })
+      .expect(413);
   });
 
   it('should require API auth before probing loopback preview URLs', async () => {

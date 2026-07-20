@@ -704,13 +704,13 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     id: 'providers.connect',
     page: 'providers',
     titleKey: 'settings.providers.page.connect.title',
-    keywords: ['add provider', 'connect provider', 'credentials'],
+    keywords: ['add provider', 'connect provider', 'provider instance', 'custom name', 'credentials'],
   },
   {
     id: 'providers.auth',
     page: 'providers',
     titleKey: 'settings.providers.page.auth.title',
-    keywords: ['api key', 'oauth', 'credentials'],
+    keywords: ['api key', 'oauth', 'subscription', 'base url', 'gateway', 'endpoint', 'credentials'],
   },
   {
     id: 'providers.connection-details',

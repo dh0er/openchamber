@@ -2,6 +2,7 @@ import { createVSCodeAPIs } from './api';
 import { onCommand, onThemeChange, proxyApiRequest, proxySessionMessageRequest, sendBridgeMessage, startSseProxy, stopSseProxy } from './api/bridge';
 import { vscodeStreamPerfCount, vscodeStreamPerfMeasure, vscodeStreamPerfObserve } from './api/streamPerf';
 import { extractBodyBase64, extractBodyText, extractJsonBody, hasInitBody } from './requestBodyTransport';
+import { providerInstanceErrorStatus } from './providerInstanceErrorStatus';
 import type { RuntimeAPIs } from '@openchamber/ui/lib/api/types';
 import { opencodeClient } from '@openchamber/ui/lib/opencode/client';
 import { sanitizeHeadersForBrowser } from '@openchamber/ui/lib/runtime-fetch';
@@ -1078,14 +1079,43 @@ const handleLocalApiRequest = async (input: RequestInfo | URL, url: URL, init: R
     }
   }
 
+  if (pathname === '/api/provider/instances' && method === 'POST') {
+    try {
+      const body = await extractJsonBody(input, init, method);
+      const directory = getRequestDirectoryHint(url, input, init);
+      const payload = body && typeof body === 'object' && !Array.isArray(body)
+        ? { ...body, ...(directory ? { directory } : {}) }
+        : body;
+      const data = await sendBridgeMessage('api:provider/instance:create', payload);
+      return jsonResponse(data, 201);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return jsonResponse({ error: message }, providerInstanceErrorStatus(message));
+    }
+  }
+
+  const providerInstanceMatch = pathname.match(/^\/api\/provider\/([^/]+)\/instance$/);
+  if (providerInstanceMatch && method === 'PUT') {
+    try {
+      const providerId = decodeURIComponent(providerInstanceMatch[1]);
+      const body = await extractJsonBody(input, init, method);
+      const directory = getRequestDirectoryHint(url, input, init);
+      const data = await sendBridgeMessage('api:provider/instance:update', { providerId, body, directory });
+      return jsonResponse(data);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return jsonResponse({ error: message }, providerInstanceErrorStatus(message));
+    }
+  }
+
   // Handle provider auth deletion: DELETE /api/provider/:providerId/auth
   const providerAuthMatch = pathname.match(/^\/api\/provider\/([^/]+)\/auth$/);
   if (providerAuthMatch && method === 'DELETE') {
     const providerId = decodeURIComponent(providerAuthMatch[1]);
     const scope = url.searchParams.get('scope') || 'auth';
-    const queryDirectory = url.searchParams.get('directory') || undefined;
+    const directory = getRequestDirectoryHint(url, input, init);
     try {
-      const data = await sendBridgeMessage('api:provider/auth:delete', { providerId, scope, directory: queryDirectory });
+      const data = await sendBridgeMessage('api:provider/auth:delete', { providerId, scope, directory });
       return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1097,9 +1127,9 @@ const handleLocalApiRequest = async (input: RequestInfo | URL, url: URL, init: R
   const providerSourceMatch = pathname.match(/^\/api\/provider\/([^/]+)\/source$/);
   if (providerSourceMatch && method === 'GET') {
     const providerId = decodeURIComponent(providerSourceMatch[1]);
-    const queryDirectory = url.searchParams.get('directory') || undefined;
+    const directory = getRequestDirectoryHint(url, input, init);
     try {
-      const data = await sendBridgeMessage('api:provider/source:get', { providerId, directory: queryDirectory });
+      const data = await sendBridgeMessage('api:provider/source:get', { providerId, directory });
       return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

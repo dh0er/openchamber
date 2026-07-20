@@ -9,7 +9,10 @@ This module provides OpenCode server integration utilities for the web server ru
 - `packages/web/server/lib/opencode/auth-state-runtime.js`: managed OpenCode server auth password/header runtime.
 - `packages/web/server/lib/opencode/cli-options.js`: CLI/environment option parsing for server startup arguments.
 - `packages/web/server/lib/opencode/cli-entry-runtime.js`: CLI entrypoint runtime that detects direct execution, parses CLI options, and starts server bootstrap.
-- `packages/web/server/lib/opencode/routes.js`: OpenCode/provider settings and auth-related route registration.
+- `packages/web/server/lib/opencode/routes.js`: OpenCode/provider settings and auth-related route registration with thin provider-instance integration.
+- `packages/web/server/lib/opencode/provider-instance-routes.js`: managed provider create/update routes and bounded OpenAI-compatible model discovery.
+- `packages/web/server/lib/opencode/providers.js`: stable provider config discovery/removal entrypoint and provider-instance re-exports.
+- `packages/web/server/lib/opencode/provider-instances.js`: managed provider-instance validation, model snapshot mapping, metadata, and persistence.
 - `packages/web/server/lib/opencode/lifecycle.js`: OpenCode process lifecycle runtime (startup, restart, readiness, health monitoring).
 - `packages/web/server/lib/opencode/env-runtime.js`: OpenCode CLI/binary resolution and shell environment runtime.
 - `packages/web/server/lib/opencode/env-config.js`: OpenCode-related environment variable parsing and validation (host/port/hostname).
@@ -46,7 +49,8 @@ This module provides OpenCode server integration utilities for the web server ru
 
 ## Public exports (auth.js)
 - `readAuthFile()`: Reads and parses `~/.local/share/opencode/auth.json`.
-- `writeAuthFile(auth)`: Writes auth file with automatic backup.
+- `writeAuthFile(auth)`: Atomically writes the auth file through a same-directory temporary file and keeps a private backup of the previous file.
+- `writeProviderApiKey(providerId, apiKey)`: Replaces the exact provider ID's auth entry with API-key auth.
 - `removeProviderAuth(providerId)`: Removes a provider's auth entry.
 - `getProviderAuth(providerId)`: Returns auth for a specific provider or null.
 - `listProviderAuths()`: Returns list of provider IDs with configured auth.
@@ -77,10 +81,40 @@ This module provides OpenCode server integration utilities for the web server ru
   - `POST /api/opencode/upgrade` (proxies OpenCode upgrade, then restarts managed OpenCode so the new binary is active)
   - `GET /api/opencode/upgrade-status`
   - `POST /api/opencode/directory`
+  - `POST /api/provider/instances`
+  - `PUT /api/provider/:providerId/instance`
   - `GET /api/provider/:providerId/source`
   - `DELETE /api/provider/:providerId/auth`
 - Owns lazy auth library loading for provider auth checks/removal.
 - Keeps route behavior independent from composition root; `index.js` now supplies dependencies only.
+
+## Provider-instance invariants
+
+- A managed instance ID is `<sourceProviderId>:openchamber:<uuid>`. Source IDs may contain `:`; parsing uses the final marker and rejects ambiguous marker-containing source IDs.
+- Creating an instance reads OpenCode's `/provider` catalog with the same validated `directory` context as the request, then writes an explicit model snapshot under the alias. The snapshot keeps only known config fields and allowlisted non-secret model options/variants; runtime model headers and arbitrary option maps are never persisted. Model API URLs with embedded credentials, fragments, or sensitive query keys are omitted.
+- The reserved `openai-compatible` source creates generic Chat Completions providers without cloning a canonical provider. Its Base URL is required, discovery performs an authenticated and bounded `GET <baseURL>/models` before any config or credential write, and the persisted alias uses top-level `npm: "@ai-sdk/openai-compatible"` with only `models[id] = { name: id }`. Discovery accepts the standard OpenAI `{ data: [{ id }] }` shape, rejects failed/oversized/empty catalogs, and never persists upstream catalog metadata.
+- Provider, model, and variant map keys reject prototype-pollution names (`__proto__`, `prototype`, and `constructor`); generated model/variant maps also use null prototypes.
+- Catalog-backed alias config carries `id: <sourceProviderId>` so OpenCode retains the canonical provider implementation while exposing the alias as a separate selectable provider. Synthetic `openai-compatible` aliases intentionally omit this top-level `id`.
+- Provider-instance source/create/update/delete routes resolve the same validated request directory (explicit header/query first, then the active project) so provider catalogs and canonical config ownership remain project-scoped.
+- Optional provider base URLs must be HTTP(S), contain no embedded credentials or fragment, and contain no sensitive query-key name after separator/case normalization (for example, `api_key`, `access-token`, or `authorization`). Source metadata redacts unsafe pre-existing values to `null`.
+- Explicit API-key updates remove any legacy `options.apiKey`, store the replacement in `auth.json` under the exact provider ID, and roll the config back if credential persistence fails. Updates without credential intent preserve a pre-existing config API key.
+- Effective config `options.apiKey` is reported as API auth ahead of any OAuth entry in `auth.json`; source metadata therefore does not need to read the auth file in that case and never exposes the key.
+- Updating a managed alias requires an existing user-config entry and remains user-owned. Updating a canonical provider ID uses the validated request directory and writes the effective owning layer in priority order (custom, project, user), defaulting to user config when no layer already owns the provider. Explicit `credentialMode: "oauth"` removes only a legacy config API key, preserves the existing OAuth auth entry and all unrelated provider options, and is rejected for managed aliases.
+- Omitting or clearing `baseURL` removes only `options.baseURL`; unrelated provider options and model metadata are preserved. These writes require a client reload but do not restart OpenCode.
+- Managed API-key instances default to direct networking and may independently select Windows system proxy settings (including PAC) or a credential-free manual HTTP(S) proxy origin. A proxy does not make the otherwise optional provider Base URL required; built-in providers continue using their default endpoint. Proxy mappings are keyed by the exact managed instance ID, persisted transactionally with connection changes, and removed with the user-owned instance. Canonical OAuth/subscription providers deliberately stay direct because replacing their authentication plugin's custom fetch would break token refresh, headers, and endpoint rewriting.
+- Managed OpenCode is restarted after connection changes so a newly installed or updated proxy hook becomes authoritative before the UI reports success. External OpenCode cannot be restarted by OpenChamber; configuration reload returns a manual-restart conflict instead of claiming that the proxy is live, and the external process must share the same OpenChamber/OpenCode configuration home.
+- Managed `openai-compatible` aliases are the exception to optional Base URL clearing: name-only updates preserve the existing required Base URL and model snapshot without contacting the gateway. Changing the Base URL or API key rediscovers the model catalog first, using the submitted key or the exact alias's stored API credential; discovery failure leaves both config and auth unchanged. A successful refresh atomically replaces the minimal model snapshot alongside the connection update.
+- `GET /api/provider/:providerId/source` exposes only non-secret connection metadata, including the authoritative auth type; credential values are never returned.
+
+## Public exports (`provider-proxy.js`)
+
+- `readProviderProxy(providerId, overrides?)` and `readProviderProxies(overrides?)`: Read the exact provider-ID proxy mapping from `~/.config/openchamber/provider-proxies.json`; a missing entry is authoritative direct mode.
+- `writeProviderProxy(providerId, settings, overrides?)`: Persist `system` or credential-free HTTP(S) `manual` proxy settings atomically. Writing `direct` removes the mapping, and deleting the last mapping removes the sidecar file.
+- `removeProviderProxy(providerId, overrides?)`: Remove one exact provider-ID mapping without affecting unrelated instances.
+- `ensureProviderProxyPlugin(overrides?)` and `ensureConfiguredProviderProxyPlugin(overrides?)`: Atomically install or refresh the private, inert OpenCode auto-discovery plugin at `~/.config/opencode/plugins/openchamber-provider-proxy.js`; the conditional helper installs it only when a non-direct mapping exists.
+- `fetchWithProviderProxy(input, init, settings, overrides?)`: Use direct fetch unchanged or perform provider discovery through a per-request manual/system proxy. Windows system mode resolves Windows proxy/PAC decisions in a hidden PowerShell process and honors `DIRECT`; other platforms require the applicable `HTTP(S)_PROXY` environment setting and retain `NO_PROXY` behavior.
+
+The sidecar is versioned and contains proxy routing only, never provider credentials. Non-direct discovery works on the supported Node 22+ runtime through per-request HTTP forwarding or HTTPS `CONNECT` tunnels, while Node 24.5+ uses its native per-request proxy agents. The generated OpenCode plugin applies exact-ID mappings to both the current `provider` config map and the legacy `providers` map, and uses Bun's per-request `fetch({ proxy })` support. Proxy URLs containing credentials are rejected.
 
 ## Public exports (session-runtime.js)
 - `createSessionRuntime({ writeSseEvent, getNotificationClients, broadcastEvent? })`: creates runtime-owned state machine and APIs for session status.
@@ -246,6 +280,7 @@ This module provides OpenCode server integration utilities for the web server ru
   - `POST /api/config/reload`
 - `registerCommonRequestMiddleware(app, dependencies)`: registers shared request middleware stack:
   - conditional JSON body parser behavior for `/api/*` vs non-API requests
+  - bounded 64 KiB JSON parsing for the explicit provider-instance create/update routes while leaving generic provider proxy requests unconsumed
   - URL-encoded parser setup
   - request logging middleware
 
@@ -354,6 +389,8 @@ This module provides OpenCode server integration utilities for the web server ru
 
 ## Storage and configuration
 - Provider auth: `~/.local/share/opencode/auth.json`.
+- Managed provider API keys use their exact alias ID as the auth-file key; canonical OAuth entries remain untouched unless an update explicitly supplies a replacement API key.
+- Auth writes create the data directory as private, write a mode-`0600` same-directory temporary file, replace the destination atomically, and keep any backup at mode `0600`; the directory is mode `0700` on POSIX. Permission-hardening failures abort the write on POSIX (and remove an insecure backup), while unsupported chmod failures are tolerated only on Windows. Temporary files are cleaned up after failure and errors never include credential content.
 - User config: `~/.config/opencode/opencode.json`.
 - Project config: `<workingDirectory>/.opencode/opencode.json` or `opencode.json`.
 - Custom config: `OPENCODE_CONFIG` env var path.
@@ -362,7 +399,7 @@ This module provides OpenCode server integration utilities for the web server ru
 ## Notes for contributors
 - This module serves as foundation for OpenCode-related server utilities.
 - Route ownership moved to module-level `routes.js`; `index.js` wires dependencies only.
-- All file writes include automatic backup before modification.
+- File writes include automatic backup before modification; provider-auth writes additionally use the atomic and private-permission rules above.
 - Config merging follows priority: custom > project > user.
 - UI auth uses scrypt for password hashing with constant-time comparison.
 - Tunnel auth treats `host.docker.internal` as local-only when the socket remote IP is private/loopback.

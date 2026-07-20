@@ -2,8 +2,12 @@ import { createProjectIdFromPath } from '../projects/project-id.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { createProviderInstanceRoutesRuntime } from './provider-instance-routes.js';
 
 export const registerOpenCodeRoutes = (app, dependencies) => {
+  const providerProxyRuntimeUnavailable = () => {
+    throw new Error('Provider proxy runtime is unavailable');
+  };
   const {
     crypto,
     clientReloadDelayMs,
@@ -16,21 +20,25 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
     validateDirectoryPath,
     resolveProjectDirectory,
     getProviderSources,
+    getProviderConnectionMetadata,
     removeProviderConfig,
+    ProviderInstanceError,
     refreshOpenCodeAfterConfigChange,
     buildOpenCodeUrl,
     getOpenCodeAuthHeaders,
+    readProviderProxy = providerProxyRuntimeUnavailable,
+    removeProviderProxy = providerProxyRuntimeUnavailable,
   } = dependencies;
 
-  let authLibrary = null;
   const pendingMcpAuthContextByState = new Map();
   const PENDING_MCP_AUTH_TTL_MS = 30 * 60 * 1000;
-  const getAuthLibrary = async () => {
-    if (!authLibrary) {
-      authLibrary = await import('./auth.js');
-    }
-    return authLibrary;
-  };
+  const providerInstanceRoutes = createProviderInstanceRoutesRuntime(dependencies);
+  const {
+    errorResponse: providerInstanceErrorResponse,
+    getAuthLibrary,
+    registerMutationRoutes: registerProviderInstanceMutationRoutes,
+    resolveRequestDirectory: resolveProviderRequestDirectory,
+  } = providerInstanceRoutes;
 
   const normalizePendingString = (value) => {
     if (typeof value !== 'string') {
@@ -374,6 +382,8 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
     }
   });
 
+  registerProviderInstanceMutationRoutes(app);
+
   app.get('/api/provider/:providerId/source', async (req, res) => {
     try {
       const { providerId } = req.params;
@@ -381,32 +391,35 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
         return res.status(400).json({ error: 'Provider ID is required' });
       }
 
-      const headerDirectory = typeof req.get === 'function' ? req.get('x-opencode-directory') : null;
-      const queryDirectory = Array.isArray(req.query?.directory)
-        ? req.query.directory[0]
-        : req.query?.directory;
-      const requestedDirectory = headerDirectory || queryDirectory || null;
-
-      let directory = null;
-      const resolved = await resolveProjectDirectory(req);
-      if (resolved.directory) {
-        directory = resolved.directory;
-      } else if (requestedDirectory) {
-        return res.status(400).json({ error: resolved.error });
-      }
+      const directory = await resolveProviderRequestDirectory(req);
 
       const sources = getProviderSources(providerId, directory);
-      const { getProviderAuth } = await getAuthLibrary();
-      const auth = getProviderAuth(providerId);
-      sources.sources.auth.exists = Boolean(auth);
+      const connection = getProviderConnectionMetadata(providerId, directory, { readProviderProxy });
+      const configAuthType = connection.authType === 'api' ? 'api' : null;
+      let auth = null;
+      let storedAuthType = null;
+      if (!configAuthType) {
+        const { getProviderAuth } = await getAuthLibrary();
+        auth = getProviderAuth(providerId);
+        storedAuthType = typeof auth?.type === 'string' && /^[a-z][a-z0-9_-]{0,31}$/i.test(auth.type)
+          ? auth.type
+          : null;
+      }
+      const authType = configAuthType || storedAuthType;
+      sources.sources.auth.exists = Boolean(configAuthType || auth);
+      sources.sources.auth.type = authType;
 
       return res.json({
         providerId,
         sources: sources.sources,
+        connection: {
+          ...connection,
+          authType,
+        },
       });
     } catch (error) {
       console.error('Failed to get provider sources:', error);
-      return res.status(500).json({ error: error.message || 'Failed to get provider sources' });
+      return providerInstanceErrorResponse(res, error, 'Failed to get provider sources');
     }
   });
 
@@ -418,24 +431,9 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
       }
 
       const scope = typeof req.query?.scope === 'string' ? req.query.scope : 'auth';
-      const headerDirectory = typeof req.get === 'function' ? req.get('x-opencode-directory') : null;
-      const queryDirectory = Array.isArray(req.query?.directory)
-        ? req.query.directory[0]
-        : req.query?.directory;
-      const requestedDirectory = headerDirectory || queryDirectory || null;
-      let directory = null;
-
-      if (scope === 'project' || requestedDirectory) {
-        const resolved = await resolveProjectDirectory(req);
-        if (!resolved.directory) {
-          return res.status(400).json({ error: resolved.error });
-        }
-        directory = resolved.directory;
-      } else {
-        const resolved = await resolveProjectDirectory(req);
-        if (resolved.directory) {
-          directory = resolved.directory;
-        }
+      const directory = await resolveProviderRequestDirectory(req);
+      if (scope === 'project' && !directory) {
+        throw new ProviderInstanceError('Directory parameter or active project is required', 400);
       }
 
       let removed = false;
@@ -455,6 +453,10 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
         return res.status(400).json({ error: 'Invalid scope' });
       }
 
+      if (scope === 'user' || scope === 'all') {
+        removed = removeProviderProxy(providerId) || removed;
+      }
+
       if (removed) {
         await refreshOpenCodeAfterConfigChange(`provider ${providerId} disconnected (${scope})`);
       }
@@ -468,7 +470,7 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
       });
     } catch (error) {
       console.error('Failed to disconnect provider:', error);
-      return res.status(500).json({ error: error.message || 'Failed to disconnect provider' });
+      return providerInstanceErrorResponse(res, error, 'Failed to disconnect provider');
     }
   });
 

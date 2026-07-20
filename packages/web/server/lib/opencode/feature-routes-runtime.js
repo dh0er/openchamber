@@ -16,7 +16,26 @@ import { registerPluginRoutes } from './plugin-routes.js';
 import { getNpmInfo, clearCache as clearNpmCache } from './npm-registry.js';
 import { parseNpmSpec, parsePathSpec, isExactSemver } from './plugin-spec.js';
 import { registerOpenCodeRoutes } from './routes.js';
-import { getProviderSources, removeProviderConfig } from './providers.js';
+import {
+  OPENAI_COMPATIBLE_PROVIDER_ID,
+  ProviderInstanceError,
+  parseOpenAICompatibleModelCatalog,
+  createProviderInstance,
+  findSourceProvider,
+  getProviderConnectionMetadata,
+  getProviderSources,
+  removeProviderConfig,
+  updateProviderInstance,
+  validateProviderInstanceCreateInput,
+  validateProviderInstanceUpdateInput,
+} from './providers.js';
+import {
+  ensureConfiguredProviderProxyPlugin,
+  fetchWithProviderProxy,
+  readProviderProxy,
+  removeProviderProxy,
+  writeProviderProxy,
+} from './provider-proxy.js';
 import { getAgentSources, getAgentConfig, createAgent, updateAgent, deleteAgent } from './agents.js';
 import { getCommandSources, createCommand, updateCommand, deleteCommand } from './commands.js';
 import { listMcpConfigs, getMcpConfig, createMcpConfig, updateMcpConfig, deleteMcpConfig } from './mcp.js';
@@ -102,6 +121,11 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       permissionAutoAcceptRuntime,
     } = routeDependencies;
 
+    // OpenCode discovers this file before provider initialization. If proxy
+    // metadata exists, a missing or unreadable hook must stop startup instead
+    // of silently sending a provider request directly.
+    ensureConfiguredProviderProxyPlugin();
+
     registerSettingsUtilityRoutes(app, {
       readCustomThemesFromDisk,
       refreshOpenCodeAfterConfigChange,
@@ -122,10 +146,23 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       validateDirectoryPath,
       resolveProjectDirectory,
       getProviderSources,
+      getProviderConnectionMetadata,
       removeProviderConfig,
+      OPENAI_COMPATIBLE_PROVIDER_ID,
+      ProviderInstanceError,
+      parseOpenAICompatibleModelCatalog,
+      validateProviderInstanceCreateInput,
+      validateProviderInstanceUpdateInput,
+      findSourceProvider,
+      createProviderInstance,
+      updateProviderInstance,
       refreshOpenCodeAfterConfigChange,
       buildOpenCodeUrl,
       getOpenCodeAuthHeaders,
+      fetchWithProviderProxy,
+      readProviderProxy,
+      writeProviderProxy,
+      removeProviderProxy,
     });
 
     registerProjectIconRoutes(app, {
