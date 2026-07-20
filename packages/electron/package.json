@@ -31,6 +31,7 @@
     "dev": "node ./scripts/electron-dev.mjs",
     "build:web-assets": "node ./scripts/build-web-assets.mjs",
     "build": "bun -e \"process.exit(0)\"",
+    "prepare:source-update": "node ./scripts/prepare-source-update.mjs",
     "prepare:opencode-cli": "node ./scripts/prepare-opencode-cli.mjs",
     "verify:opencode-cli": "node ./scripts/verify-opencode-cli.mjs --staged",
     "verify:opencode-cli:packaged": "node ./scripts/verify-opencode-cli.mjs --packaged",
@@ -39,12 +40,13 @@
     "generate:macos-icon": "node ./scripts/generate-macos-icon-assets.cjs",
     "rebuild:native": "node ./scripts/rebuild-native.mjs",
     "test:architecture": "node --test ./scripts/target-architecture.test.mjs ./scripts/verify-linux-appimage.test.mjs ./scripts/verify-update-manifest.test.mjs",
-    "test:updater": "node --test ./updater-capability.test.mjs ./updater-check.test.mjs ./updater-feed.test.mjs ./scripts/updater-e2e-fixture.test.mjs",
+    "test:updater": "node --test ./updater-capability.test.mjs ./updater-check.test.mjs ./updater-feed.test.mjs ./source-updater/*.test.mjs ./scripts/prepare-source-update.test.mjs ./scripts/updater-e2e-fixture.test.mjs",
+    "test:source-updater": "node --test ./source-updater/*.test.mjs ./scripts/prepare-source-update.test.mjs",
     "updater:e2e:fixture": "node ./scripts/updater-e2e-fixture.mjs",
     "verify:update-manifest": "node ./scripts/verify-update-manifest.mjs",
-    "package": "bun run build:web-assets && bun run prepare:opencode-cli && bun run bundle:main && bun run rebuild:native && node ./scripts/package.mjs",
+    "package": "bun run prepare:source-update && bun run build:web-assets && bun run prepare:opencode-cli && bun run bundle:main && bun run rebuild:native && node ./scripts/package.mjs",
     "finalize:latest-yml": "node ./scripts/finalize-latest-yml.mjs",
-    "type-check": "node --check ./main.mjs && node --check ./preload.mjs",
+    "type-check": "node --check ./main.mjs && node --check ./preload.mjs && node --check ./source-updater/index.mjs && node --check ./source-updater/core.mjs && node --check ./source-updater/contracts.mjs && node --check ./source-updater/environment.mjs && node --check ./source-updater/main-integration.mjs && node --check ./source-updater/packaged-assets.mjs && node --check ./source-updater/process-runner.mjs && node --check ./source-updater/windows-install.mjs && node --check ./scripts/prepare-source-update.mjs",
     "lint": "node -e \"process.exit(0)\""
   },
   "build": {
@@ -74,6 +76,10 @@
       {
         "from": "resources/opencode-cli",
         "to": "opencode-cli"
+      },
+      {
+        "from": "resources/source-update",
+        "to": "source-update"
       }
     ],
     "afterPack": "scripts/after-pack.cjs",

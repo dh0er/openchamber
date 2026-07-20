@@ -17,6 +17,10 @@ import { sanitizeRuntimeRequestHeaders } from './runtime-request-headers.mjs';
 import { assertUpdaterCapability } from './updater-capability.mjs';
 import { checkForDesktopUpdate } from './updater-check.mjs';
 import { resolveUpdaterFeed } from './updater-feed.mjs';
+import {
+  createSourceUpdateMainController,
+  isPackagedSourceUpdateBuild,
+} from './source-updater/main-integration.mjs';
 import { mintOutsideFileGrant } from '@openchamber/web/server/lib/fs/routes.js';
 
 const execFileAsync = promisify(execFile);
@@ -183,8 +187,13 @@ const DISCORD_INVITE_URL = 'https://discord.gg/ZYRSdnwwKA';
 const INSTALLED_APPS_CACHE_TTL_SECS = 60 * 60 * 24;
 const INSTALLED_APPS_CACHE_FILE = 'discovered-apps.json';
 const OPENCODE_SHUTDOWN_GRACE_MS = 100;
+const SOURCE_UPDATE_CANCEL_GRACE_MS = 30_000;
+const SOURCE_UPDATE_SSH_SHUTDOWN_GRACE_MS = 15_000;
 
 const { autoUpdater } = updaterPkg;
+let sourceUpdateController = null;
+let sourceUpdateMode = false;
+let sourceUpdateSetupError = null;
 
 const state = {
   serverHandle: null,
@@ -314,7 +323,52 @@ const shutdownSshSessions = async () => {
   await state.sshShutdownPromise;
 };
 
+const shutdownSshSessionsBeforeSourceInstall = async () => {
+  let timeout;
+  let timedOut = false;
+  try {
+    await Promise.race([
+      shutdownSshSessions(),
+      new Promise((resolve) => {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, SOURCE_UPDATE_SSH_SHUTDOWN_GRACE_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+  if (!timedOut) return;
+  log.warn('[electron] SSH shutdown timed out before source update installation; forcing local SSH processes closed');
+  sshManager.forceShutdownAll();
+};
+
+const waitForSourceUpdateCancellation = async (cancellation) => {
+  let timeout;
+  try {
+    await Promise.race([
+      Promise.resolve(cancellation),
+      new Promise((resolve) => {
+        timeout = setTimeout(resolve, SOURCE_UPDATE_CANCEL_GRACE_MS);
+      }),
+    ]);
+  } catch (error) {
+    log.warn('[electron] source update cancellation failed:', error);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+};
+
 const prepareForQuit = ({ installingUpdate = false } = {}) => {
+  let sourceUpdateCancellation = Promise.resolve(false);
+  try {
+    sourceUpdateCancellation = Promise.resolve(
+      sourceUpdateController?.cancelPreparation?.() ?? false,
+    );
+  } catch (error) {
+    log.warn('[electron] failed to cancel source update preparation:', error);
+  }
   state.quitRequested = true;
   state.quitConfirmed = true;
   state.installingUpdate = installingUpdate;
@@ -339,18 +393,19 @@ const prepareForQuit = ({ installingUpdate = false } = {}) => {
 
   if (installingUpdate) {
     state.backgroundShutdownComplete = true;
-    return;
+    return sourceUpdateCancellation;
   }
 
   shutdownBackgroundServices();
+  return sourceUpdateCancellation;
 };
 
 const performConfirmedQuit = () => {
   if (state.quitInProgress) return;
   state.quitInProgress = true;
 
-  prepareForQuit();
-  app.exit(0);
+  const cancellation = prepareForQuit();
+  void waitForSourceUpdateCancellation(cancellation).finally(() => app.exit(0));
 };
 
 // Hard-stop signals (`Ctrl+C` on `electron:dev`, an external `kill`/SIGTERM,
@@ -360,12 +415,15 @@ const performConfirmedQuit = () => {
 // reaper remains the backstop for an unhandled hard crash (SIGKILL).
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
+    if (state.quitInProgress) return;
+    state.quitInProgress = true;
+    let cancellation = Promise.resolve(false);
     try {
-      shutdownBackgroundServices();
+      cancellation = prepareForQuit();
     } catch (error) {
       log.warn(`[electron] ${signal} shutdown failed:`, error);
     }
-    app.exit(0);
+    void waitForSourceUpdateCancellation(cancellation).finally(() => app.exit(0));
   });
 }
 
@@ -2160,9 +2218,9 @@ const openDevToolsForMenuTarget = () => {
 };
 
 const relaunchFromMenu = () => {
-  prepareForQuit();
+  const cancellation = prepareForQuit();
   app.relaunch();
-  app.exit(0);
+  void waitForSourceUpdateCancellation(cancellation).finally(() => app.exit(0));
 };
 
 const nextWindowLabel = () => {
@@ -2826,6 +2884,23 @@ const setupAutoUpdater = () => {
   if (!app.isPackaged) {
     return;
   }
+
+  if (isPackagedSourceUpdateBuild({ resourcesPath: process.resourcesPath })) {
+    sourceUpdateMode = true;
+    try {
+      sourceUpdateController = createSourceUpdateMainController({
+        resourcesPath: process.resourcesPath,
+        currentExecutablePath: process.execPath,
+        logger: log,
+      });
+      log.info('[electron] custom source updater enabled');
+    } catch (error) {
+      sourceUpdateSetupError = error;
+      log.error('[electron] custom source updater initialization failed', error);
+    }
+    return;
+  }
+
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.allowPrerelease = false;
@@ -2868,6 +2943,54 @@ const setupAutoUpdater = () => {
     setTaskbarProgress(-1);
     log.error('[electron] autoUpdater error', err);
   });
+};
+
+const requireSourceUpdateController = () => {
+  if (sourceUpdateController) return sourceUpdateController;
+  if (sourceUpdateSetupError instanceof Error) throw sourceUpdateSetupError;
+  throw new Error('The custom source updater is unavailable in this build.');
+};
+
+const publishSourceUpdateProgress = (progress, browserWindow) => {
+  const step = Number(progress?.data?.step || 0);
+  const stepCount = Number(progress?.data?.stepCount || 0);
+  if (progress?.event === 'Finished' || progress?.event === 'Failed') {
+    setTaskbarProgress(-1);
+  } else {
+    setTaskbarProgress(stepCount > 0 ? Math.max(0.01, Math.min(1, step / stepCount)) : 0.01);
+  }
+  if (
+    browserWindow
+    && !browserWindow.isDestroyed()
+    && !browserWindow.webContents?.isDestroyed?.()
+    && isLocalSender(browserWindow.webContents)
+  ) {
+    emitToWindow(browserWindow, 'openchamber:update-progress', mapUpdaterProgressEvent(progress));
+  }
+};
+
+const showPendingSourceInstallResult = async () => {
+  if (!sourceUpdateMode) return;
+  try {
+    const result = await requireSourceUpdateController().consumeInstallResult();
+    if (!result) return;
+    if (result.status === 'success') {
+      log.info('[electron] source-built update installed successfully');
+      return;
+    }
+    log.error(`[electron] source-built update install failed code=${result.code}`);
+    await dialog.showMessageBox({
+      type: 'error',
+      title: 'OpenChamber update failed',
+      message: 'The source-built update could not be installed.',
+      detail: `Installer helper stopped with code: ${result.code}\n\nOpenChamber relaunched the existing installation when possible.`,
+      buttons: ['OK'],
+      defaultId: 0,
+      noLink: true,
+    });
+  } catch (error) {
+    log.warn('[electron] unable to read source-update install result', error);
+  }
 };
 
 const parseRelevantChangelogNotes = async (fromVersion, toVersion) => {
@@ -3890,19 +4013,24 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
         root.desktopVibrancy = enabled;
       });
       setImmediate(() => {
-        try {
-          prepareForQuit();
-          app.relaunch();
-          app.exit(0);
-        } catch (err) {
-          log.error('[electron] desktop_set_vibrancy relaunch failed', err);
-        }
+        void (async () => {
+          try {
+            const cancellation = prepareForQuit();
+            app.relaunch();
+            await waitForSourceUpdateCancellation(cancellation);
+            app.exit(0);
+          } catch (err) {
+            log.error('[electron] desktop_set_vibrancy relaunch failed', err);
+          }
+        })();
       });
       return { enabled, requiresRestart: true };
     }
 
     case 'desktop_check_for_updates': {
       assertUpdaterCapability({ packaged: app.isPackaged });
+      if (sourceUpdateMode) return requireSourceUpdateController().check();
+
       const currentVersion = APP_VERSION;
       const { available, updateInfo, updateResult, nextVersion, pendingUpdate } = await checkForDesktopUpdate({
         autoUpdater,
@@ -3927,9 +4055,19 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
 
     case 'desktop_download_and_install_update':
       assertUpdaterCapability({ packaged: app.isPackaged });
+      if (sourceUpdateMode) {
+        try {
+          return await requireSourceUpdateController().prepare({
+            onProgress: (progress) => publishSourceUpdateProgress(progress, browserWindow),
+          });
+        } finally {
+          setTaskbarProgress(-1);
+        }
+      }
       if (!state.pendingUpdate) {
         throw new Error('No pending update');
       }
+
       setTaskbarProgress(0.01);
       emitToAllWindows('openchamber:update-progress', mapUpdaterProgressEvent({
         event: 'Started',
@@ -3971,6 +4109,35 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       }
 
     case 'desktop_restart': {
+      const sourceApplyUpdate = Boolean(
+        sourceUpdateMode
+        && requireSourceUpdateController().hasPreparedUpdate()
+        && app.isPackaged
+      );
+      if (sourceApplyUpdate) {
+        assertUpdaterCapability({ packaged: app.isPackaged });
+        await requireSourceUpdateController().scheduleInstallAndRelaunch();
+
+        log.info('[electron] desktop_restart scheduled source-built update');
+        const cancellation = prepareForQuit({ installingUpdate: true });
+        setImmediate(() => {
+          void (async () => {
+            try {
+              killSidecar();
+              await Promise.all([
+                shutdownSshSessionsBeforeSourceInstall(),
+                waitForSourceUpdateCancellation(cancellation),
+              ]);
+              app.exit(0);
+            } catch (error) {
+              log.error('[electron] source-built update shutdown failed', error);
+              app.exit(1);
+            }
+          })();
+        });
+        return null;
+      }
+
       const applyUpdate = Boolean(state.pendingUpdate?.downloaded && app.isPackaged);
       if (applyUpdate) assertUpdaterCapability({ packaged: app.isPackaged });
       log.info(`[electron] desktop_restart applyUpdate=${applyUpdate} packaged=${app.isPackaged}`);
@@ -4002,18 +4169,21 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       // Without this, quitAndInstall() can race with the renderer's pending
       // invoke and the restart appears to do nothing from the UI side.
       setImmediate(() => {
-        try {
-          if (applyUpdate) {
-            killSidecar();
-            autoUpdater.quitAndInstall();
-          } else {
-            prepareForQuit();
-            app.relaunch();
-            app.exit(0);
+        void (async () => {
+          try {
+            if (applyUpdate) {
+              killSidecar();
+              autoUpdater.quitAndInstall();
+            } else {
+              const cancellation = prepareForQuit();
+              app.relaunch();
+              await waitForSourceUpdateCancellation(cancellation);
+              app.exit(0);
+            }
+          } catch (err) {
+            log.error('[electron] desktop_restart failed', err);
           }
-        } catch (err) {
-          log.error('[electron] desktop_restart failed', err);
-        }
+        })();
       });
       return null;
     }
@@ -4869,6 +5039,7 @@ app.whenReady().then(async () => {
   nativeTheme.themeSource = readThemeSource();
   registerPackagedUiProtocol();
   setupAutoUpdater();
+  await showPendingSourceInstallResult();
 
   if (process.platform === 'darwin') {
     Menu.setApplicationMenu(buildMacMenu());

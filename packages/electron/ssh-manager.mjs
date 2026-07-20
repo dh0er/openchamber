@@ -219,25 +219,67 @@ const parseSshCommand = (raw) => {
 };
 
 const runOutput = async (command, args, options = {}) => {
+  const {
+    timeoutMs = 0,
+    spawnProcess = spawn,
+    registerChild = null,
+    ...spawnOptions
+  } = options;
   return await new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const child = spawnProcess(command, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       ...WINDOWS_HIDDEN_SPAWN_OPTIONS,
-      ...options,
+      ...spawnOptions,
     });
 
     let stdout = '';
     let stderr = '';
-    child.stdout?.on('data', (chunk) => {
+    let settled = false;
+    let timeout = null;
+    const onStdout = (chunk) => {
       stdout += chunk.toString();
-    });
-    child.stderr?.on('data', (chunk) => {
+    };
+    const onStderr = (chunk) => {
       stderr += chunk.toString();
-    });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      resolve({ code: typeof code === 'number' ? code : -1, stdout, stderr });
-    });
+    };
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout);
+      child.stdout?.off?.('data', onStdout);
+      child.stderr?.off?.('data', onStderr);
+      child.off?.('error', onError);
+      child.off?.('close', onClose);
+    };
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    const onError = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onClose = (code) => {
+      finish({ code: typeof code === 'number' ? code : -1, stdout, stderr });
+    };
+    child.stdout?.on('data', onStdout);
+    child.stderr?.on('data', onStderr);
+    child.on('error', onError);
+    child.on('close', onClose);
+    registerChild?.(child);
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timeout = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch {}
+        child.stdout?.destroy?.();
+        child.stderr?.destroy?.();
+        child.unref?.();
+        finish({ code: -1, stdout, stderr: stderr || 'SSH command timed out' });
+        child.once?.('error', () => {});
+      }, timeoutMs);
+      timeout.unref?.();
+    }
   });
 };
 
@@ -247,38 +289,45 @@ const buildSshArgs = (parsed, preDestinationArgs = [], remoteCommand = null) => 
   return args;
 };
 
-const runRemoteCommand = async (parsed, controlPath, script, timeoutSec = DEFAULT_CONNECTION_TIMEOUT_SEC) => {
+const runRemoteCommand = async (
+  parsed,
+  controlPath,
+  script,
+  timeoutSec = DEFAULT_CONNECTION_TIMEOUT_SEC,
+  commandTimeoutMs = 0,
+  runCommand = runOutput,
+) => {
   const args = buildSshArgs(parsed, [
     '-o', 'ControlMaster=no',
     '-o', `ControlPath=${controlPath}`,
     '-o', `ConnectTimeout=${timeoutSec}`,
     '-T',
   ], `sh -lc ${shellQuote(script)}`);
-  const { code, stdout, stderr } = await runOutput('ssh', args);
+  const { code, stdout, stderr } = await runCommand('ssh', args, { timeoutMs: commandTimeoutMs });
   if (code !== 0) {
     throw new Error((stderr || stdout || 'Remote command failed').trim());
   }
   return stdout;
 };
 
-const controlMasterOperation = async (parsed, controlPath, op) => {
-  return await runOutput('ssh', buildSshArgs(parsed, [
+const controlMasterOperation = async (parsed, controlPath, op, runCommand = runOutput) => {
+  return await runCommand('ssh', buildSshArgs(parsed, [
     '-o', 'ControlMaster=no',
     '-o', `ControlPath=${controlPath}`,
     '-o', 'BatchMode=yes',
     '-o', 'ConnectTimeout=3',
     '-O', op,
-  ]));
+  ]), { timeoutMs: 5_000 });
 };
 
-const isControlMasterAlive = async (parsed, controlPath) => {
-  const { code } = await controlMasterOperation(parsed, controlPath, 'check');
+const isControlMasterAlive = async (parsed, controlPath, runCommand = runOutput) => {
+  const { code } = await controlMasterOperation(parsed, controlPath, 'check', runCommand);
   return code === 0;
 };
 
-const stopControlMasterBestEffort = async (parsed, controlPath) => {
+const stopControlMasterBestEffort = async (parsed, controlPath, runCommand = runOutput) => {
   try {
-    await controlMasterOperation(parsed, controlPath, 'exit');
+    await controlMasterOperation(parsed, controlPath, 'exit', runCommand);
   } catch {
   }
 };
@@ -427,6 +476,59 @@ export class ElectronSshManager {
     this.reconnectAttempts = new Map();
     this.connectAttempts = new Map();
     this.connecting = new Map();
+    this.activeChildren = new Set();
+    this.spawnProcess = options.spawnProcess || spawn;
+    this.forceShutdownRequested = false;
+  }
+
+  trackChild(child) {
+    this.activeChildren.add(child);
+    const release = () => {
+      this.activeChildren.delete(child);
+      child.off?.('error', release);
+      child.off?.('close', release);
+    };
+    child.once?.('error', release);
+    child.once?.('close', release);
+    return child;
+  }
+
+  runTrackedOutput(command, args, options = {}) {
+    if (this.forceShutdownRequested) {
+      throw new Error('SSH manager is shutting down');
+    }
+    return runOutput(command, args, {
+      ...options,
+      spawnProcess: this.spawnProcess,
+      registerChild: (child) => this.trackChild(child),
+    });
+  }
+
+  runRemoteCommand(parsed, controlPath, script, timeoutSec = DEFAULT_CONNECTION_TIMEOUT_SEC, commandTimeoutMs = 0) {
+    return runRemoteCommand(
+      parsed,
+      controlPath,
+      script,
+      timeoutSec,
+      commandTimeoutMs,
+      (command, args, options) => this.runTrackedOutput(command, args, options),
+    );
+  }
+
+  stopControlMasterBestEffort(parsed, controlPath) {
+    return stopControlMasterBestEffort(
+      parsed,
+      controlPath,
+      (command, args, options) => this.runTrackedOutput(command, args, options),
+    );
+  }
+
+  isControlMasterAlive(parsed, controlPath) {
+    return isControlMasterAlive(
+      parsed,
+      controlPath,
+      (command, args, options) => this.runTrackedOutput(command, args, options),
+    );
   }
 
   appendLogWithLevel(id, level, message) {
@@ -791,7 +893,7 @@ export class ElectronSshManager {
   }
 
   async resolveSshConfig(parsed) {
-    const { code, stdout, stderr } = await runOutput('ssh', buildSshArgs(parsed, ['-G']));
+    const { code, stdout, stderr } = await this.runTrackedOutput('ssh', buildSshArgs(parsed, ['-G']));
     if (code !== 0) {
       throw new Error(stderr.trim() || 'Failed to resolve SSH config');
     }
@@ -821,7 +923,10 @@ export class ElectronSshManager {
   }
 
   async spawnMasterProcess(parsed, controlPath, askpassPath, sshPassword) {
-    const child = spawn('ssh', buildSshArgs(parsed, [
+    if (this.forceShutdownRequested) {
+      throw new Error('SSH manager is shutting down');
+    }
+    const child = this.spawnProcess('ssh', buildSshArgs(parsed, [
       '-o', 'ControlMaster=yes',
       '-o', `ControlPath=${controlPath}`,
       '-o', `ControlPersist=${DEFAULT_CONTROL_PERSIST_SEC}`,
@@ -837,14 +942,14 @@ export class ElectronSshManager {
         ...(sshPassword ? { OPENCHAMBER_SSH_ASKPASS_VALUE: sshPassword.trim() } : {}),
       },
     });
-    return child;
+    return this.trackChild(child);
   }
 
   async waitForMasterReady(parsed, controlPath, timeoutSec, master) {
     const deadline = Date.now() + (timeoutSec * 1000);
     let pollMs = 250;
     while (Date.now() < deadline) {
-      const { code } = await runOutput('ssh', buildSshArgs(parsed, [
+      const { code } = await this.runTrackedOutput('ssh', buildSshArgs(parsed, [
         '-o', 'ControlMaster=no',
         '-o', `ControlPath=${controlPath}`,
         '-O', 'check',
@@ -868,7 +973,7 @@ export class ElectronSshManager {
 
   async remoteCommandExists(parsed, controlPath, commandName) {
     try {
-      const output = await runRemoteCommand(parsed, controlPath, `command -v ${commandName} >/dev/null 2>&1 && echo yes || echo no`);
+      const output = await this.runRemoteCommand(parsed, controlPath, `command -v ${commandName} >/dev/null 2>&1 && echo yes || echo no`);
       return output.trim() === 'yes';
     } catch {
       return false;
@@ -877,7 +982,7 @@ export class ElectronSshManager {
 
   async currentRemoteOpenChamberVersion(parsed, controlPath) {
     try {
-      const output = await runRemoteCommand(parsed, controlPath, 'openchamber --version 2>/dev/null || true');
+      const output = await this.runRemoteCommand(parsed, controlPath, 'openchamber --version 2>/dev/null || true');
       return parseVersionToken(output);
     } catch {
       return null;
@@ -907,7 +1012,7 @@ export class ElectronSshManager {
     let lastError = null;
     for (const command of commands) {
       try {
-        await runRemoteCommand(parsed, controlPath, command);
+        await this.runRemoteCommand(parsed, controlPath, command);
         return;
       } catch (error) {
         lastError = error;
@@ -920,7 +1025,7 @@ export class ElectronSshManager {
     const authPayload = openchamberPassword ? JSON.stringify({ password: openchamberPassword }) : '{}';
     const authEnabled = openchamberPassword ? '1' : '0';
     const script = `AUTH_STATUS=0; INFO_STATUS=0; HEALTH_STATUS=0; BODY_FILE="$(mktemp)"; COOKIE_FILE="$(mktemp)"; cleanup(){ rm -f "$BODY_FILE" "$COOKIE_FILE"; }; trap cleanup EXIT; if command -v curl >/dev/null 2>&1; then if [ "${authEnabled}" = "1" ]; then AUTH_STATUS="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' -c "$COOKIE_FILE" -H 'content-type: application/json' --data ${shellQuote(authPayload)} http://127.0.0.1:${port}/auth/session || true)"; if [ "$AUTH_STATUS" = "200" ]; then INFO_STATUS="$(curl -sS --max-time 3 -b "$COOKIE_FILE" -o "$BODY_FILE" -w '%{http_code}' http://127.0.0.1:${port}/api/system/info || true)"; else INFO_STATUS="$(curl -sS --max-time 3 -o "$BODY_FILE" -w '%{http_code}' http://127.0.0.1:${port}/api/system/info || true)"; fi; else INFO_STATUS="$(curl -sS --max-time 3 -o "$BODY_FILE" -w '%{http_code}' http://127.0.0.1:${port}/api/system/info || true)"; fi; HEALTH_STATUS="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:${port}/health || true)"; elif command -v wget >/dev/null 2>&1; then wget -qO "$BODY_FILE" http://127.0.0.1:${port}/api/system/info >/dev/null 2>&1; if [ $? -eq 0 ]; then INFO_STATUS=200; fi; wget -qO- http://127.0.0.1:${port}/health >/dev/null 2>&1; if [ $? -eq 0 ]; then HEALTH_STATUS=200; fi; else exit 127; fi; printf 'INFO_STATUS=%s\\nAUTH_STATUS=%s\\nHEALTH_STATUS=%s\\n' "$INFO_STATUS" "$AUTH_STATUS" "$HEALTH_STATUS"; cat "$BODY_FILE" 2>/dev/null || true`;
-    const output = await runRemoteCommand(parsed, controlPath, script);
+    const output = await this.runRemoteCommand(parsed, controlPath, script);
     const lines = output.split(/\r?\n/);
     const infoStatus = parseProbeStatusLine(lines[0], 'INFO_STATUS=') || 0;
     const authStatus = parseProbeStatusLine(lines[1], 'AUTH_STATUS=') || 0;
@@ -963,24 +1068,29 @@ export class ElectronSshManager {
     if (secret) {
       envPrefix += ` OPENCHAMBER_UI_PASSWORD=${shellQuote(secret)}`;
     }
-    const output = await runRemoteCommand(parsed, controlPath, `${envPrefix} openchamber serve --hostname 127.0.0.1 --port ${desiredPort}`);
+    const output = await this.runRemoteCommand(parsed, controlPath, `${envPrefix} openchamber serve --hostname 127.0.0.1 --port ${desiredPort}`);
     const port = output.split(/\s+/).map((token) => Number.parseInt(token, 10)).find((value) => Number.isFinite(value));
     return port || desiredPort;
   }
 
   async stopRemoteServerBestEffort(parsed, controlPath, remotePort) {
     try {
-      await runRemoteCommand(
+      await this.runRemoteCommand(
         parsed,
         controlPath,
         `if command -v curl >/dev/null 2>&1; then curl -fsS -X POST http://127.0.0.1:${remotePort}/api/system/shutdown >/dev/null 2>&1 || true; elif command -v wget >/dev/null 2>&1; then wget -qO- --method=POST http://127.0.0.1:${remotePort}/api/system/shutdown >/dev/null 2>&1 || true; fi`,
+        DEFAULT_CONNECTION_TIMEOUT_SEC,
+        5_000,
       );
     } catch {
     }
   }
 
   async spawnMainForward(parsed, controlPath, bindHost, localPort, remotePort) {
-    return spawn('ssh', buildSshArgs(parsed, [
+    if (this.forceShutdownRequested) {
+      throw new Error('SSH manager is shutting down');
+    }
+    const child = this.spawnProcess('ssh', buildSshArgs(parsed, [
       '-o', 'ControlMaster=no',
       '-o', `ControlPath=${controlPath}`,
       '-N',
@@ -989,6 +1099,7 @@ export class ElectronSshManager {
       stdio: ['ignore', 'ignore', 'pipe'],
       ...WINDOWS_HIDDEN_SPAWN_OPTIONS,
     });
+    return this.trackChild(child);
   }
 
   async spawnExtraForward(parsed, controlPath, forward) {
@@ -1004,7 +1115,7 @@ export class ElectronSshManager {
     } else {
       args.push('-D', `${forward.localHost || '127.0.0.1'}:${forward.localPort}`);
     }
-    const { code, stdout, stderr } = await runOutput('ssh', buildSshArgs(parsed, args));
+    const { code, stdout, stderr } = await this.runTrackedOutput('ssh', buildSshArgs(parsed, args));
     if (code !== 0) {
       throw new Error((stderr || stdout || `Failed to configure extra SSH forward ${forward.id}`).trim());
     }
@@ -1063,7 +1174,7 @@ export class ElectronSshManager {
       if (session.startedByUs && session.instance.remoteOpenchamber.mode === 'managed' && !session.instance.remoteOpenchamber.keepRunning) {
         await this.stopRemoteServerBestEffort(session.parsed, session.controlPath, session.remotePort);
       }
-      await stopControlMasterBestEffort(session.parsed, session.controlPath);
+      await this.stopControlMasterBestEffort(session.parsed, session.controlPath);
       for (const child of [session.mainForward, session.master]) {
         try {
           child.kill('SIGTERM');
@@ -1105,7 +1216,7 @@ export class ElectronSshManager {
     await this.waitForMasterReady(parsed, controlPath, instance.connectionTimeoutSec || DEFAULT_CONNECTION_TIMEOUT_SEC, master);
 
     this.setStatus(id, 'remote_probe', 'Probing remote platform');
-    const remoteOs = (await runRemoteCommand(parsed, controlPath, 'uname -s', instance.connectionTimeoutSec || DEFAULT_CONNECTION_TIMEOUT_SEC)).trim().toLowerCase();
+    const remoteOs = (await this.runRemoteCommand(parsed, controlPath, 'uname -s', instance.connectionTimeoutSec || DEFAULT_CONNECTION_TIMEOUT_SEC)).trim().toLowerCase();
     if (!['linux', 'darwin'].includes(remoteOs)) {
       master.kill('SIGTERM');
       throw new Error(`Unsupported remote OS: ${remoteOs}`);
@@ -1220,7 +1331,7 @@ export class ElectronSshManager {
           // Fast path: cheap TCP probe before expensive SSH subprocess
           if (await isLocalTunnelReachable(session.localPort)) {
             // Tunnel alive — skip SSH check
-          } else if (!await isControlMasterAlive(session.parsed, session.controlPath)) {
+          } else if (!await this.isControlMasterAlive(session.parsed, session.controlPath)) {
             droppedReason = 'SSH ControlMaster is not reachable';
           } else {
             detachedNotice = 'Local tunnel unreachable but ControlMaster is alive';
@@ -1312,8 +1423,24 @@ export class ElectronSshManager {
 
   async shutdownAll() {
     const ids = [...new Set([...this.sessions.keys(), ...this.connecting.keys(), ...this.monitorTimers.keys()])];
-    for (const id of ids) {
-      await this.disconnectInternal(id, false);
+    await Promise.allSettled(ids.map((id) => this.disconnectInternal(id, false)));
+  }
+
+  forceShutdownAll() {
+    this.forceShutdownRequested = true;
+    for (const timer of this.monitorTimers.values()) clearTimeout(timer);
+    this.monitorTimers.clear();
+    const children = new Set(this.activeChildren);
+    for (const session of this.sessions.values()) {
+      for (const child of [session.mainForward, session.master]) {
+        if (child) children.add(child);
+      }
     }
+    for (const child of children) {
+      try { child?.kill?.('SIGKILL'); } catch {}
+    }
+    this.activeChildren.clear();
+    this.sessions.clear();
+    this.connecting.clear();
   }
 }

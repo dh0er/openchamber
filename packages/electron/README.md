@@ -60,11 +60,12 @@ bun run electron:build
 
 That runs, in order:
 
-1. `build:web-assets` to build the web UI and copy it into `packages/electron/resources/web-dist`.
-2. `prepare:opencode-cli` to download/cache the pinned OpenCode CLI and copy it into `packages/electron/resources/opencode-cli`.
-3. `bundle:main` to create `packages/electron/dist-bundle/main.mjs`.
-4. `rebuild:native` to rebuild native modules for Electron.
-5. `package.mjs` to run `electron-builder`.
+1. `prepare:source-update` to verify the clean linear custom patch stack and stage its Git bundle plus manifest.
+2. `build:web-assets` to build the web UI and copy it into `packages/electron/resources/web-dist`.
+3. `prepare:opencode-cli` to download/cache the pinned OpenCode CLI and copy it into `packages/electron/resources/opencode-cli`.
+4. `bundle:main` to create `packages/electron/dist-bundle/main.mjs`.
+5. `rebuild:native` to rebuild native modules for Electron.
+6. `package.mjs` to run `electron-builder`.
 
 Build output goes to `packages/electron/dist`.
 
@@ -82,7 +83,17 @@ After packaging, run `bun run --cwd packages/electron verify:linux-appimage`. Th
 
 Running a packaged Linux AppImage requires FUSE (`libfuse.so.2`, typically `libfuse2` / `libfuse2t64` on Debian/Ubuntu). Without FUSE, start with `APPIMAGE_EXTRACT_AND_RUN=1`. Keep the AppImage on a writable path so in-app updates can replace it.
 
-Linux updates are supported only when the packaged app is running from a writable AppImage. Update checks, downloads, and installation report an actionable error when `APPIMAGE` is missing, invalid, or read-only; a missing release feed (`latest-linux.yml` 404 before the first Linux publish) is treated as “no update available”. macOS and Windows updater behavior is unchanged. Release builds keep `latest-linux.yml` (x64) and `latest-linux-arm64.yml` separate and validate each manifest against its AppImage before upload. Linux AppImages download full updates (no `.blockmap` differential channel yet).
+Linux updates are supported only when the packaged app is running from a writable AppImage. Update checks, downloads, and installation report an actionable error when `APPIMAGE` is missing, invalid, or read-only; a missing release feed (`latest-linux.yml` 404 before the first Linux publish) is treated as “no update available”. macOS and standard Windows updater behavior is unchanged. Release builds keep `latest-linux.yml` (x64) and `latest-linux-arm64.yml` separate and validate each manifest against its AppImage before upload. Linux AppImages download full updates (no `.blockmap` differential channel yet).
+
+### Custom Source Updates
+
+This fork's packaged Windows build carries a verified Git bundle containing only the linear topic commits between the official upstream base and the custom branch. The accompanying source manifest pins the official repository URL and ref, base and observed upstream SHAs, patch-head SHA, bundle hash, and application version. Platform and architecture are bound later in the prepared-installer manifest. Neither phase embeds or modifies the developer checkout that produced the installed app.
+
+When that source-update resource is present in a packaged Windows build, Desktop skips `electron-updater` completely. An update check compares the embedded upstream base SHA with the current `openchamber/openchamber` `main` SHA. Preparing an update creates a fresh repository below `%LOCALAPPDATA%\OpenChamberUpdate`, imports the verified patch bundle, rebases it onto the pinned upstream SHA, and then runs the frozen install, tests, typechecks, lint, and full Electron build. A conflict aborts the rebase and returns a bounded, credential-redacted report; no build or installer process starts on that path.
+
+Only a successfully gated Windows installer is copied into durable ready storage. A separate **Install and restart** action rechecks its path and SHA-256 before a hidden helper waits for the current app process, runs NSIS, records the result, and relaunches OpenChamber. Git, the exact Bun version and minimum Node.js version declared by the fetched source, network access, and sufficient temporary disk space are required on the machine performing a source update.
+
+Builds without the custom source-update manifest retain the normal official binary updater behavior.
 
 ### Updater End-to-End Fixture
 
