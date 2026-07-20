@@ -3,7 +3,12 @@ import os from 'os';
 import path from 'path';
 import { readAuthFile } from '../opencode/auth.js';
 import { readConfigLayers } from '../opencode/shared.js';
-import { getModelCatalog } from './catalog.js';
+import {
+  getModelCatalog,
+  getProviderDescriptor,
+  getProviderModelDescriptor,
+  isManagedProviderInstanceID,
+} from './catalog.js';
 import { resolveSmallModel, parseModelRef, isUsableAuthEntry, getAuthEntryForProvider } from './resolve.js';
 import { callSmallModel } from './call.js';
 
@@ -36,8 +41,10 @@ const readSmallModelSettingsOverride = () => {
 const DEFAULT_CONTEXT_TOKENS = 64_000;
 const OUTPUT_RESERVE_TOKENS = 4_000;
 
-const clampPromptToModelLimit = ({ prompt, catalog, providerID, modelID }) => {
-  const limit = catalog?.[providerID]?.models?.[modelID]?.limit;
+const clampPromptToModelLimit = ({ prompt, catalog, providerConfigs, providerID, modelID }) => {
+  const providerConfig = providerConfigs?.[providerID];
+  const { provider } = getProviderDescriptor(catalog, providerID, providerConfig);
+  const limit = getProviderModelDescriptor(provider, modelID)?.model?.limit;
   const contextTokens = Number(limit?.context) > 0 ? Number(limit.context) : DEFAULT_CONTEXT_TOKENS;
   const inputBudgetTokens = Math.max(1_000, contextTokens - OUTPUT_RESERVE_TOKENS);
   const maxChars = inputBudgetTokens * 4;
@@ -47,13 +54,19 @@ const clampPromptToModelLimit = ({ prompt, catalog, providerID, modelID }) => {
   return { prompt: `${prompt.slice(0, maxChars)}…`, truncated: true };
 };
 
-const readConfiguredSmallModel = (workingDirectory) => {
+const readSmallModelConfiguration = (workingDirectory) => {
   try {
     const { mergedConfig } = readConfigLayers(workingDirectory);
     const value = mergedConfig?.small_model;
-    return typeof value === 'string' ? value : null;
+    const providers = mergedConfig?.provider;
+    return {
+      smallModel: typeof value === 'string' ? value : null,
+      providerConfigs: providers && typeof providers === 'object' && !Array.isArray(providers)
+        ? providers
+        : {},
+    };
   } catch {
-    return null;
+    return { smallModel: null, providerConfigs: {} };
   }
 };
 
@@ -68,6 +81,7 @@ export async function generateSmallModelText({ prompt, system, maxOutputTokens, 
 
   const auth = readAuthFile();
   const catalog = await getModelCatalog().catch(() => ({}));
+  const configuration = readSmallModelConfiguration(directory);
 
   const explicit = parseModelRef(model);
   const resolved = explicit
@@ -75,8 +89,9 @@ export async function generateSmallModelText({ prompt, system, maxOutputTokens, 
     : resolveSmallModel({
       auth,
       catalog,
+      providerConfigs: configuration.providerConfigs,
       settingsSmallModel: readSmallModelSettingsOverride(),
-      configSmallModel: readConfiguredSmallModel(directory),
+      configSmallModel: configuration.smallModel,
       preferredProviderID,
       preferredModelID,
     });
@@ -104,6 +119,7 @@ export async function generateSmallModelText({ prompt, system, maxOutputTokens, 
   const clamped = clampPromptToModelLimit({
     prompt: prompt.trim(),
     catalog,
+    providerConfigs: configuration.providerConfigs,
     providerID: resolved.providerID,
     modelID: resolved.modelID,
   });
@@ -137,7 +153,9 @@ export function listAuthenticatedProviders() {
   try {
     const auth = readAuthFile();
     const ids = new Set(
-      Object.keys(auth || {}).filter((providerID) => isUsableAuthEntry(auth[providerID])),
+      Object.keys(auth || {}).filter((providerID) =>
+        isUsableAuthEntry(auth[providerID])
+        && (!isManagedProviderInstanceID(providerID) || auth[providerID].type === 'api')),
     );
     // The catalog id is github-copilot while legacy auth entries may sit
     // under the copilot alias.
@@ -156,11 +174,13 @@ export function listAuthenticatedProviders() {
 export async function describeSmallModel({ directory, preferredProviderID, preferredModelID } = {}) {
   const auth = readAuthFile();
   const catalog = await getModelCatalog().catch(() => ({}));
+  const configuration = readSmallModelConfiguration(directory);
   const resolved = resolveSmallModel({
     auth,
     catalog,
+    providerConfigs: configuration.providerConfigs,
     settingsSmallModel: readSmallModelSettingsOverride(),
-    configSmallModel: readConfiguredSmallModel(directory),
+    configSmallModel: configuration.smallModel,
     preferredProviderID,
     preferredModelID,
   });

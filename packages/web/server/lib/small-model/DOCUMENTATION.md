@@ -26,12 +26,19 @@ other runtime API.
      **within the session's provider first** (`preferredProviderID`, like
      OpenCode resolves within the current provider), then over the other
      providers with a usable auth entry, newest `release_date` first.
+     OpenChamber-managed provider instances (`<source>:openchamber:<uuid>`)
+     participate under their exact instance id. Their config entry must point
+     back to `<source>` through `id`, and its cloned `models` are used for the
+     family scan instead of requiring a models.dev entry for the instance id.
+     Model-map keys remain the OpenCode model ids; a nested model `id`, when
+     present, is the upstream API id used by the direct request.
   3. GitHub Copilot hidden utility models (`gpt-*-nano/mini`) — these never
      appear in the catalog, so they participate as the `gpt-nano` family entry
      and as a final utility fallback.
   4. Last resort: the session's own model (`preferredModelID`) when no small
      model resolves anywhere — costlier, but always valid.
-- Input clamp: the prompt is truncated to the resolved model's catalog
+- Input clamp: the prompt is truncated to the resolved model's catalog (or
+  managed instance config)
   `limit.context` (minus an output reserve, ~4 chars/token estimate;
   conservative default when the model is not in the catalog). Truncation is
   reported as `inputTruncated: true` in the response.
@@ -47,6 +54,16 @@ other runtime API.
   - **Anthropic** (`type: api`): `/v1/messages` with `x-api-key`.
   - **Google** (`type: api`): `generateContent` with `x-goog-api-key`; Gemini 3
     uses `thinkingLevel` while older Flash models use `thinkingBudget: 0`.
+  - **Managed provider instances**: credentials are resolved only from the
+    exact instance id, while the validated source `id` selects the canonical
+    wire format. Instances are API-key-only and never inherit or enter the
+    source provider's OAuth/subscription flow. An instance `options.baseURL`
+    overrides the endpoint for native Anthropic and Google calls too:
+    Anthropic appends `/v1/messages` (without duplicating an existing `/v1`),
+    while Google appends `/models/<model>:generateContent` to the configured
+    API prefix. Every managed-instance request also uses the instance's stored
+    direct, system/PAC, or manual proxy route; utility calls never bypass that
+    routing policy.
   - Everything else: OpenAI-compatible `/chat/completions` against the
     provider's base URL, resolved from (1) `provider.<id>.options.baseURL`
     in the OpenCode config, (2) the hardcoded `https://api.openai.com/v1`
@@ -82,6 +99,8 @@ module is imported on first request, not at server startup.
 - Anthropic OAuth (Claude Pro/Max) entries are not supported — OpenCode itself
   keeps those outside `auth.json` in this generation; only `type: api` keys
   work for Anthropic.
+- OpenChamber-managed provider instances support API-key credentials only;
+  subscription/OAuth logins remain attached to the canonical provider id.
 - Amazon Bedrock, GitLab, Azure and other credential-chain providers are out
   of scope; they need more than a key/token (regions, resource names).
 - Responses from the codex backend are collected from the SSE stream; the

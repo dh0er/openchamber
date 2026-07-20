@@ -2,8 +2,13 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { readAuthFile, writeAuthFile } from '../opencode/auth.js';
+import { fetchWithProviderProxy, readProviderProxy } from '../opencode/provider-proxy.js';
 import { readConfig, readConfigLayers } from '../opencode/shared.js';
-import { getCatalogProvider } from './catalog.js';
+import {
+  getProviderDescriptor,
+  getProviderModelDescriptor,
+  isManagedProviderInstanceID,
+} from './catalog.js';
 import { getAuthEntryForProvider } from './resolve.js';
 
 // Direct, non-streaming text generation against the provider APIs, replicating
@@ -20,6 +25,8 @@ const USER_AGENT = 'opencode/1.0 openchamber';
 const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
+const ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
+const GOOGLE_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 const httpError = async (response, provider) => {
   const body = await response.text().catch(() => '');
@@ -105,7 +112,7 @@ const ensureFreshOpenaiOauth = async (entry) => {
 // Wire formats
 // ---------------------------------------------------------------------------
 
-const callOpenaiCompatible = async ({ baseURL, headers, modelID, prompt, system, maxOutputTokens, providerLabel, extraBody }) => {
+const callOpenaiCompatible = async ({ requestFetch = fetch, baseURL, headers, modelID, prompt, system, maxOutputTokens, providerLabel, extraBody }) => {
   const trimmedBase = baseURL.replace(/\/+$/, '');
   console.log('[small-model:diagnostic] request', {
     provider: providerLabel,
@@ -116,7 +123,7 @@ const callOpenaiCompatible = async ({ baseURL, headers, modelID, prompt, system,
     systemChars: system?.length ?? 0,
     inputChars: prompt.length + (system?.length ?? 0),
   });
-  const response = await fetch(`${trimmedBase}/chat/completions`, {
+  const response = await requestFetch(`${trimmedBase}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -183,8 +190,15 @@ const callOpenaiCompatible = async ({ baseURL, headers, modelID, prompt, system,
   return text;
 };
 
-const callAnthropic = async ({ apiKey, modelID, prompt, system, maxOutputTokens }) => {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
+const getAnthropicMessagesURL = (baseURL) => {
+  const trimmedBase = baseURL.replace(/\/+$/, '');
+  if (/\/v1\/messages$/i.test(trimmedBase)) return trimmedBase;
+  if (/\/v1$/i.test(trimmedBase)) return `${trimmedBase}/messages`;
+  return `${trimmedBase}/v1/messages`;
+};
+
+const callAnthropic = async ({ requestFetch = fetch, apiKey, baseURL, modelID, prompt, system, maxOutputTokens }) => {
+  const response = await requestFetch(getAnthropicMessagesURL(baseURL), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -214,12 +228,13 @@ const callAnthropic = async ({ apiKey, modelID, prompt, system, maxOutputTokens 
   return text;
 };
 
-const callGoogle = async ({ apiKey, modelID, prompt, system, maxOutputTokens }) => {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelID)}:generateContent`;
+const callGoogle = async ({ requestFetch = fetch, apiKey, baseURL, modelID, prompt, system, maxOutputTokens }) => {
+  const trimmedBase = baseURL.replace(/\/+$/, '');
+  const url = `${trimmedBase}/models/${encodeURIComponent(modelID)}:generateContent`;
   const thinkingConfig = modelID.toLowerCase().startsWith('gemini-3')
     ? { thinkingLevel: modelID.toLowerCase().includes('flash') ? 'minimal' : 'low' }
     : { thinkingBudget: 0 };
-  const response = await fetch(url, {
+  const response = await requestFetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -358,6 +373,7 @@ const readProviderConfig = (workingDirectory, providerID) => {
     const rawApiKey = typeof providerCfg?.options?.apiKey === 'string' ? providerCfg.options.apiKey.trim() : null;
     const apiKey = rawApiKey ? resolveConfigApiKey(rawApiKey, workingDirectory, providerID) : null;
     return {
+      definition: providerCfg,
       baseURL,
       // Shape the config-supplied key as a regular api-key auth entry so it
       // can win the precedence check below and flow through the dispatch's
@@ -368,15 +384,42 @@ const readProviderConfig = (workingDirectory, providerID) => {
     // Provider config is non-essential — continue with catalog-only resolution.
     return null;
   }
-}
+};
 
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
-export async function callSmallModel({ auth, catalog, workingDirectory, providerID, modelID, prompt, system, maxOutputTokens }) {
+export async function callSmallModel({
+  auth,
+  catalog,
+  workingDirectory,
+  providerID,
+  modelID,
+  prompt,
+  system,
+  maxOutputTokens,
+  providerProxyRuntime,
+}) {
   const tokens = Number(maxOutputTokens) > 0 ? Number(maxOutputTokens) : DEFAULT_MAX_OUTPUT_TOKENS;
   const providerConfig = readProviderConfig(workingDirectory, providerID);
+  const { sourceID, isManaged, provider } = getProviderDescriptor(
+    catalog,
+    providerID,
+    providerConfig?.definition,
+  );
+  const requestModelID = isManaged
+    ? getProviderModelDescriptor(provider, modelID)?.apiID || modelID
+    : modelID;
+  const requestFetch = isManaged
+    ? (input, init) => (
+        providerProxyRuntime?.fetchWithProviderProxy || fetchWithProviderProxy
+      )(
+        input,
+        init,
+        (providerProxyRuntime?.readProviderProxy || readProviderProxy)(providerID),
+      )
+    : (providerProxyRuntime?.fetch || fetch);
   // Match OpenCode's resolveSDK precedence:
   // config provider.<id>.options.apiKey (providerConfig.auth) wins; the
   // auth.json entry is only a fallback.
@@ -385,7 +428,11 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
     throw new Error(`No OpenCode login found for provider "${providerID}"`);
   }
 
-  if (providerID === 'github-copilot') {
+  if (isManagedProviderInstanceID(providerID) && entry.type !== 'api') {
+    throw new Error(`Managed provider instance "${providerID}" requires an API key`);
+  }
+
+  if (sourceID === 'github-copilot') {
     // OpenCode uses the stored device-OAuth token directly as the bearer —
     // access === refresh, no exchange, no expiry.
     const token = entry.refresh || entry.access || entry.key;
@@ -396,6 +443,7 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
       ? `https://copilot-api.${String(entry.enterpriseUrl).replace(/^https?:\/\//, '').replace(/\/+$/, '')}`
       : 'https://api.githubcopilot.com';
     return callOpenaiCompatible({
+      requestFetch,
       baseURL,
       headers: {
         Authorization: `Bearer ${token}`,
@@ -404,7 +452,7 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
         'x-initiator': 'agent',
         'X-GitHub-Api-Version': '2026-06-01',
       },
-      modelID,
+      modelID: requestModelID,
       prompt,
       system,
       maxOutputTokens: tokens,
@@ -412,12 +460,12 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
     });
   }
 
-  if (providerID === 'openai' && entry.type === 'oauth') {
+  if (sourceID === 'openai' && !isManaged && entry.type === 'oauth') {
     const fresh = await ensureFreshOpenaiOauth(entry);
     return callCodexResponses({
       accessToken: fresh.access,
       accountId: fresh.accountId || extractChatgptAccountId(fresh.access),
-      modelID,
+      modelID: requestModelID,
       prompt,
       system,
     });
@@ -430,11 +478,27 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
     throw new Error(`OpenCode login for "${providerID}" has no usable credential`);
   }
 
-  if (providerID === 'anthropic') {
-    return callAnthropic({ apiKey, modelID, prompt, system, maxOutputTokens: tokens });
+  if (sourceID === 'anthropic') {
+    return callAnthropic({
+      requestFetch,
+      apiKey,
+      baseURL: providerConfig?.baseURL || ANTHROPIC_BASE_URL,
+      modelID: requestModelID,
+      prompt,
+      system,
+      maxOutputTokens: tokens,
+    });
   }
-  if (providerID === 'google') {
-    return callGoogle({ apiKey, modelID, prompt, system, maxOutputTokens: tokens });
+  if (sourceID === 'google') {
+    return callGoogle({
+      requestFetch,
+      apiKey,
+      baseURL: providerConfig?.baseURL || GOOGLE_BASE_URL,
+      modelID: requestModelID,
+      prompt,
+      system,
+      maxOutputTokens: tokens,
+    });
   }
 
   // Everything else: OpenAI-compatible chat completions against the catalog's
@@ -443,12 +507,11 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
   // fall back to its baseURL from the OpenCode provider config. The openai
   // provider also respects provider.openai.options.baseURL — OpenCode itself
   // uses the same config for all providers including openai.
-  const provider = getCatalogProvider(catalog, providerID);
   const providerConfigUrl = providerConfig?.baseURL;
   const defaultOpenaiUrl = 'https://api.openai.com/v1';
   const baseURL = typeof providerConfigUrl === 'string' && providerConfigUrl
     ? providerConfigUrl
-    : providerID === 'openai'
+    : sourceID === 'openai'
       ? defaultOpenaiUrl
       : typeof provider?.api === 'string' && provider.api
         ? provider.api
@@ -463,17 +526,18 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
   // parameter: unknown body fields 400 on some providers, so this stays an
   // explicit allowlist. Models without a switch (DeepSeek, Qwen, Kimi, …)
   // just get the generous output budget.
-  const lowerModel = modelID.toLowerCase();
-  const supportsThinkingToggle = providerID.includes('zai')
-    || providerID.includes('zhipu')
+  const lowerModel = requestModelID.toLowerCase();
+  const supportsThinkingToggle = sourceID.includes('zai')
+    || sourceID.includes('zhipu')
     || lowerModel.includes('glm')
     || lowerModel.includes('minimax-m3');
   const extraBody = supportsThinkingToggle ? { thinking: { type: 'disabled' } } : undefined;
 
   return callOpenaiCompatible({
+    requestFetch,
     baseURL,
     headers: { Authorization: `Bearer ${apiKey}` },
-    modelID,
+    modelID: requestModelID,
     prompt,
     system,
     maxOutputTokens: tokens,

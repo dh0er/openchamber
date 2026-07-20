@@ -27,6 +27,10 @@ const CATALOG = {
   },
 };
 
+const ANTHROPIC_INSTANCE_ID = 'anthropic:openchamber:4a132b87-d17b-47a7-a68d-65ba68f2510b';
+const GOOGLE_INSTANCE_ID = 'google:openchamber:5b243c98-e28c-48b8-b79e-76cb79e3621c';
+const OPENAI_INSTANCE_ID = 'openai:openchamber:6c354da9-f39d-49c9-8a0f-87dc8af4732d';
+
 const ok = (content) => ({
   ok: true,
   status: 200,
@@ -449,5 +453,186 @@ describe('callSmallModel — Google thinking configuration', () => {
 
     const body = JSON.parse(lastCall(fetchMock).init.body);
     expect(body.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });
+  });
+});
+
+describe('callSmallModel - managed provider instances', () => {
+  let fetchMock;
+  let originalFetch;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock;
+    readConfig.mockReset();
+    readConfigLayers.mockReset();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('uses Anthropic wire format, the alias key, and the alias baseURL', async () => {
+    readConfig.mockReturnValue({
+      provider: {
+        [ANTHROPIC_INSTANCE_ID]: {
+          id: 'anthropic',
+          name: 'Anthropic Work',
+          models: { 'claude-haiku-4-5': { id: 'claude-haiku-upstream' } },
+          options: { baseURL: 'https://anthropic-gateway.example.test/v1/' },
+        },
+      },
+    });
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ content: [{ type: 'text', text: 'anthropic answer' }] }),
+    });
+
+    const text = await callSmallModel({
+      auth: {
+        anthropic: { type: 'api', key: 'canonical-key' },
+        [ANTHROPIC_INSTANCE_ID]: { type: 'api', key: 'alias-key' },
+      },
+      catalog: CATALOG,
+      workingDirectory: '/proj',
+      providerID: ANTHROPIC_INSTANCE_ID,
+      modelID: 'claude-haiku-4-5',
+      prompt: 'hi',
+    });
+
+    expect(text).toBe('anthropic answer');
+    const { url, init } = lastCall(fetchMock);
+    expect(url).toBe('https://anthropic-gateway.example.test/v1/messages');
+    expect(init.headers['x-api-key']).toBe('alias-key');
+    expect(JSON.stringify(init)).not.toContain('canonical-key');
+    const body = JSON.parse(init.body);
+    expect(body.model).toBe('claude-haiku-upstream');
+    expect(body.messages).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
+  it('routes managed instance requests through the stored provider proxy', async () => {
+    readConfig.mockReturnValue({
+      provider: {
+        [ANTHROPIC_INSTANCE_ID]: {
+          id: 'anthropic',
+          models: { 'claude-haiku-4-5': { id: 'claude-haiku-upstream' } },
+          options: { baseURL: 'https://anthropic-gateway.example.test/v1' },
+        },
+      },
+    });
+    const proxy = { mode: 'manual', url: 'http://127.0.0.1:9000' };
+    const readProviderProxy = vi.fn(() => proxy);
+    const fetchWithProviderProxy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ content: [{ type: 'text', text: 'proxied answer' }] }),
+    }));
+
+    const text = await callSmallModel({
+      auth: { [ANTHROPIC_INSTANCE_ID]: { type: 'api', key: 'alias-key' } },
+      catalog: {},
+      workingDirectory: '/proj',
+      providerID: ANTHROPIC_INSTANCE_ID,
+      modelID: 'claude-haiku-4-5',
+      prompt: 'hi',
+      providerProxyRuntime: { readProviderProxy, fetchWithProviderProxy },
+    });
+
+    expect(text).toBe('proxied answer');
+    expect(readProviderProxy).toHaveBeenCalledWith(ANTHROPIC_INSTANCE_ID);
+    expect(fetchWithProviderProxy).toHaveBeenCalledWith(
+      'https://anthropic-gateway.example.test/v1/messages',
+      expect.objectContaining({ method: 'POST' }),
+      proxy,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('uses Google wire format and appends the model path to the alias baseURL', async () => {
+    readConfig.mockReturnValue({
+      provider: {
+        [GOOGLE_INSTANCE_ID]: {
+          id: 'google',
+          models: { 'gemini-2.5-flash': { id: 'gemini-2.5-flash-upstream' } },
+          options: { baseURL: 'https://google-gateway.example.test/gemini/v1beta/' },
+        },
+      },
+    });
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: 'google answer' }] } }] }),
+    });
+
+    await callSmallModel({
+      auth: { [GOOGLE_INSTANCE_ID]: { type: 'api', key: 'google-alias-key' } },
+      catalog: {},
+      workingDirectory: '/proj',
+      providerID: GOOGLE_INSTANCE_ID,
+      modelID: 'gemini-2.5-flash',
+      prompt: 'hi',
+    });
+
+    const { url, init } = lastCall(fetchMock);
+    expect(url).toBe('https://google-gateway.example.test/gemini/v1beta/models/gemini-2.5-flash-upstream:generateContent');
+    expect(init.headers['x-goog-api-key']).toBe('google-alias-key');
+    expect(JSON.parse(init.body).contents).toBeDefined();
+  });
+
+  it('keeps an OpenAI API-key alias off the canonical ChatGPT OAuth endpoint', async () => {
+    readConfig.mockReturnValue({
+      provider: {
+        [OPENAI_INSTANCE_ID]: {
+          id: 'openai',
+          name: 'OpenAI Gateway',
+          models: { 'gpt-4o-mini': { id: 'gpt-4o-mini-upstream' } },
+          options: { baseURL: 'https://openai-gateway.example.test/v1' },
+        },
+      },
+    });
+    fetchMock.mockResolvedValue(ok('openai alias answer'));
+
+    await callSmallModel({
+      auth: {
+        openai: { type: 'oauth', access: 'canonical-oauth', expires: Date.now() + 60_000 },
+        [OPENAI_INSTANCE_ID]: { type: 'api', key: 'openai-alias-key' },
+      },
+      catalog: {},
+      workingDirectory: '/proj',
+      providerID: OPENAI_INSTANCE_ID,
+      modelID: 'gpt-4o-mini',
+      prompt: 'hi',
+    });
+
+    const { url, init } = lastCall(fetchMock);
+    expect(url).toBe('https://openai-gateway.example.test/v1/chat/completions');
+    expect(init.headers.Authorization).toBe('Bearer openai-alias-key');
+    expect(url).not.toContain('chatgpt.com');
+    expect(JSON.stringify(init)).not.toContain('canonical-oauth');
+    expect(JSON.parse(init.body).model).toBe('gpt-4o-mini-upstream');
+  });
+
+  it('rejects OAuth credentials stored under an alias id before any request', async () => {
+    readConfig.mockReturnValue({
+      provider: {
+        [OPENAI_INSTANCE_ID]: {
+          id: 'openai',
+          models: { 'gpt-4o-mini': { id: 'gpt-4o-mini' } },
+        },
+      },
+    });
+
+    await expect(callSmallModel({
+      auth: { [OPENAI_INSTANCE_ID]: { type: 'oauth', access: 'alias-oauth' } },
+      catalog: {},
+      workingDirectory: '/proj',
+      providerID: OPENAI_INSTANCE_ID,
+      modelID: 'gpt-4o-mini',
+      prompt: 'hi',
+    })).rejects.toThrow(`Managed provider instance "${OPENAI_INSTANCE_ID}" requires an API key`);
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

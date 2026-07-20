@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import { resolveSmallModel, parseModelRef, isUsableAuthEntry } from './resolve.js';
+import { isManagedProviderInstanceID } from './catalog.js';
 
 const catalog = {
   google: {
@@ -18,6 +19,10 @@ const catalog = {
     },
   },
 };
+
+const ANTHROPIC_INSTANCE_ID = 'anthropic:openchamber:4a132b87-d17b-47a7-a68d-65ba68f2510b';
+const COLON_SOURCE_INSTANCE_ID = 'custom:provider:openchamber:5b243c98-e28c-48b8-b79e-76cb79e3621c';
+const AT_SOURCE_INSTANCE_ID = 'custom@provider:openchamber:6c354da9-f39d-49c9-879d-87dc8af3622d';
 
 describe('parseModelRef', () => {
   it('splits provider/model on the first slash', () => {
@@ -56,6 +61,13 @@ describe('isUsableAuthEntry', () => {
   });
 });
 
+describe('isManagedProviderInstanceID', () => {
+  it('accepts every source-id character allowed by provider instance creation', () => {
+    expect(isManagedProviderInstanceID(COLON_SOURCE_INSTANCE_ID)).toBe(true);
+    expect(isManagedProviderInstanceID(AT_SOURCE_INSTANCE_ID)).toBe(true);
+  });
+});
+
 describe('resolveSmallModel', () => {
   it('gives the OpenChamber settings override top priority', () => {
     const result = resolveSmallModel({
@@ -87,6 +99,100 @@ describe('resolveSmallModel', () => {
       configSmallModel: null,
     });
     expect(result).toEqual({ providerID: 'google', modelID: 'gemini-2.5-flash', source: 'family-scan' });
+  });
+
+  it('scans a managed instance using its configured cloned models', () => {
+    const result = resolveSmallModel({
+      auth: {
+        [ANTHROPIC_INSTANCE_ID]: { type: 'api', key: 'alias-key' },
+      },
+      catalog,
+      providerConfigs: {
+        [ANTHROPIC_INSTANCE_ID]: {
+          id: 'anthropic',
+          name: 'Anthropic Work',
+          models: {
+            'claude-haiku-instance': {
+              id: 'claude-haiku-upstream',
+              family: 'claude-haiku',
+              release_date: '2026-06-01',
+            },
+          },
+        },
+      },
+      configSmallModel: null,
+    });
+
+    expect(result).toEqual({
+      providerID: ANTHROPIC_INSTANCE_ID,
+      modelID: 'claude-haiku-instance',
+      source: 'family-scan',
+    });
+  });
+
+  it('derives a colon-delimited source id from the final managed marker', () => {
+    const result = resolveSmallModel({
+      auth: { [COLON_SOURCE_INSTANCE_ID]: { type: 'api', key: 'alias-key' } },
+      catalog: {},
+      providerConfigs: {
+        [COLON_SOURCE_INSTANCE_ID]: {
+          id: 'custom:provider',
+          models: {
+            'custom-nano': {
+              id: 'custom-nano-upstream',
+              family: 'gpt-nano',
+              release_date: '2026-07-01',
+            },
+          },
+        },
+      },
+      configSmallModel: null,
+    });
+
+    expect(result).toEqual({
+      providerID: COLON_SOURCE_INSTANCE_ID,
+      modelID: 'custom-nano',
+      source: 'family-scan',
+    });
+  });
+
+  it('does not inherit canonical models when a managed config id is inconsistent', () => {
+    const result = resolveSmallModel({
+      auth: { [ANTHROPIC_INSTANCE_ID]: { type: 'api', key: 'alias-key' } },
+      catalog,
+      providerConfigs: {
+        [ANTHROPIC_INSTANCE_ID]: {
+          id: 'google',
+          models: catalog.anthropic.models,
+        },
+      },
+      configSmallModel: null,
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it('skips OAuth credentials stored under managed instance ids', () => {
+    const result = resolveSmallModel({
+      auth: {
+        [ANTHROPIC_INSTANCE_ID]: { type: 'oauth', access: 'alias-oauth' },
+        anthropic: { type: 'api', key: 'canonical-key' },
+      },
+      catalog,
+      providerConfigs: {
+        [ANTHROPIC_INSTANCE_ID]: {
+          id: 'anthropic',
+          models: catalog.anthropic.models,
+        },
+      },
+      configSmallModel: null,
+    });
+
+    expect(result).toEqual({
+      providerID: 'anthropic',
+      modelID: 'claude-haiku-4-5',
+      source: 'family-scan',
+    });
   });
 
   it('skips providers without a usable credential', () => {
