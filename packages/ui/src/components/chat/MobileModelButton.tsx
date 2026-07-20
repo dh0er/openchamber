@@ -1,7 +1,7 @@
 import React from 'react';
 import { cn } from '@/lib/utils';
 import { useConfigStore } from '@/stores/useConfigStore';
-import { getModelDisplayName } from './mobileControlsUtils';
+import { getProviderAndModelDisplayName } from '@/lib/modelDisplay';
 import { ProviderLogo } from '@/components/ui/ProviderLogo';
 import { useI18n } from '@/lib/i18n';
 
@@ -14,9 +14,15 @@ export const MobileModelButton: React.FC<MobileModelButtonProps> = ({ onOpenMode
     const { t } = useI18n();
     const currentModelId = useConfigStore((state) => state.currentModelId);
     const currentProviderId = useConfigStore((state) => state.currentProviderId);
-    const getCurrentProvider = useConfigStore((state) => state.getCurrentProvider);
-    const currentProvider = getCurrentProvider();
-    const modelLabel = getModelDisplayName(currentProvider, currentModelId, t('chat.modelControls.selectModel'));
+    const providers = useConfigStore((state) => state.providers);
+    const currentProvider = React.useMemo(
+        () => providers.find((provider) => provider.id === currentProviderId),
+        [currentProviderId, providers],
+    );
+    const modelLabel = getProviderAndModelDisplayName(currentProvider, currentModelId, {
+        fallbackLabel: t('chat.modelControls.selectModel'),
+        fallbackProviderId: currentProviderId,
+    });
 
     return (
         <button
@@ -44,7 +50,7 @@ export const MobileModelButton: React.FC<MobileModelButtonProps> = ({ onOpenMode
         >
             <span className="flex h-full w-full min-w-0 items-center gap-1">
                 {currentProviderId ? (
-                    <ProviderLogo providerId={currentProviderId} className="size-4 flex-shrink-0" />
+                    <ProviderLogo providerId={currentProviderId} alt="" className="size-4 flex-shrink-0" />
                 ) : null}
                 <span className="truncate">{modelLabel}</span>
             </span>

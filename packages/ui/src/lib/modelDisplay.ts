@@ -4,12 +4,18 @@ export type DisplayModel = Record<string, unknown> & {
 };
 
 export type DisplayProvider = {
+  id?: unknown;
+  name?: unknown;
   models?: DisplayModel[] | Record<string, DisplayModel | undefined>;
 } | null | undefined;
 
 type ModelDisplayOptions = {
   fallbackLabel?: string;
   maxLength?: number;
+};
+
+type ProviderAndModelDisplayOptions = ModelDisplayOptions & {
+  fallbackProviderId?: string;
 };
 
 const normalizeString = (value: unknown): string => {
@@ -268,4 +274,22 @@ export const getProviderModelDisplayName = (
   const normalizedModelId = normalizeString(modelId);
   const model = getProviderModel(provider, normalizedModelId);
   return getModelDisplayName(model, normalizedModelId, options);
+};
+
+export const getProviderAndModelDisplayName = (
+  provider: DisplayProvider,
+  modelId: string | null | undefined,
+  options: ProviderAndModelDisplayOptions = {},
+): string => {
+  const normalizedModelId = normalizeString(modelId);
+  const modelName = getProviderModelDisplayName(provider, normalizedModelId, options);
+  if (!normalizedModelId) {
+    return modelName;
+  }
+
+  const providerName = normalizeString(provider?.name)
+    || normalizeString(provider?.id)
+    || normalizeString(options.fallbackProviderId);
+
+  return providerName && modelName ? `${providerName} / ${modelName}` : modelName;
 };

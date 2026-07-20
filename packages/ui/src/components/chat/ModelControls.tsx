@@ -22,7 +22,10 @@ import { isDesktopShell } from '@/lib/desktop';
 import { getAgentColor } from '@/lib/agentColors';
 import { useDeviceInfo } from '@/lib/device';
 import { mergeModelMetadataWithLiveModel } from '@/lib/modelMetadata';
-import { getModelDisplayName as getSharedModelDisplayName } from '@/lib/modelDisplay';
+import {
+    getModelDisplayName as getSharedModelDisplayName,
+    getProviderAndModelDisplayName,
+} from '@/lib/modelDisplay';
 import { getEditModeColors } from '@/lib/permissions/editModeColors';
 import { cn, fuzzyMatch } from '@/lib/utils';
 import { useContextStore } from '@/stores/contextStore';
@@ -1292,9 +1295,13 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         return getModelDisplayName(currentModel, currentModelId) || t('chat.modelControls.selectModel');
     };
 
-    const currentModelDisplayName = getCurrentModelDisplayName();
+    const currentProviderAndModelDisplayName = getProviderAndModelDisplayName(currentProvider, currentModelId, {
+        fallbackLabel: t('chat.modelControls.selectModel'),
+        fallbackProviderId: currentProviderId,
+        maxLength: 40,
+    });
     const modelLabelRef = React.useRef<HTMLSpanElement>(null);
-    const isModelLabelTruncated = useIsTextTruncated(modelLabelRef, [currentModelDisplayName, isCompact]);
+    const isModelLabelTruncated = useIsTextTruncated(modelLabelRef, [currentProviderAndModelDisplayName, isCompact]);
 
     const getAgentDisplayName = () => {
         if (!uiAgentName) {
@@ -2308,6 +2315,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                         <>
                                             <ProviderLogo
                                                 providerId={currentProviderId}
+                                                alt=""
                                                 className={cn(controlIconSize, 'flex-shrink-0')}
                                             />
                                             <Icon name="pencil-ai" className={cn(controlIconSize, 'text-primary/60 hidden')} />
@@ -2327,7 +2335,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                             )}
                                         >
                                             <span className={cn('marquee-text', isModelLabelTruncated && 'marquee-text--active')}>
-                                                {currentModelDisplayName}
+                                                {currentProviderAndModelDisplayName}
                                             </span>
                                         </span>
                                     )}
@@ -2425,6 +2433,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                 {currentProviderId ? (
                                     <ProviderLogo
                                         providerId={currentProviderId}
+                                        alt=""
                                         className={cn(controlIconSize, 'flex-shrink-0')}
                                     />
                                 ) : (
@@ -2438,7 +2447,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                     )}
                                 >
                                     <span className={cn('marquee-text', isModelLabelTruncated && 'marquee-text--active')}>
-                                        {currentModelDisplayName}
+                                        {currentProviderAndModelDisplayName}
                                     </span>
                                 </span>
                             </>

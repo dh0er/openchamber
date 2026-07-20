@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
-import { getModelDisplayName, getProviderModelDisplayName, humanizeModelId } from './modelDisplay';
+import {
+  getModelDisplayName,
+  getProviderAndModelDisplayName,
+  getProviderModelDisplayName,
+  humanizeModelId,
+} from './modelDisplay';
 
 describe('modelDisplay', () => {
   test('prefers model name over ids', () => {
@@ -27,6 +32,34 @@ describe('modelDisplay', () => {
     };
 
     expect(getProviderModelDisplayName(provider, 'very-long-model-id', { maxLength: 9 })).toBe('Very L...');
+  });
+
+  test('combines the custom provider instance name and model name', () => {
+    const provider = {
+      id: 'anthropic:openchamber:instance-id',
+      name: 'Thales Gateway',
+      models: [{ id: 'claude-sonnet-5', name: 'Claude Sonnet 5' }],
+    };
+
+    expect(getProviderAndModelDisplayName(provider, 'claude-sonnet-5')).toBe('Thales Gateway / Claude Sonnet 5');
+  });
+
+  test('falls back to provider ids without exposing an undefined label', () => {
+    expect(getProviderAndModelDisplayName(
+      { id: 'anthropic', name: '', models: [{ id: 'claude-sonnet-5' }] },
+      'claude-sonnet-5',
+    )).toBe('anthropic / Claude Sonnet 5');
+    expect(getProviderAndModelDisplayName(undefined, 'my-model-v2', {
+      fallbackProviderId: 'custom-instance',
+    })).toBe('custom-instance / My Model V2');
+  });
+
+  test('keeps the model placeholder unchanged when no model is selected', () => {
+    expect(getProviderAndModelDisplayName(
+      { id: 'anthropic', name: 'Thales Gateway' },
+      undefined,
+      { fallbackLabel: 'Select model' },
+    )).toBe('Select model');
   });
 
   test('humanizes provider-prefixed model ids using common model catalog patterns', () => {
