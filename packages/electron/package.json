@@ -128,6 +128,9 @@
     "nsis": {
       "oneClick": true,
       "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "OpenChamber",
       "installerIcon": "resources/icons/icon.ico",
       "uninstallerIcon": "resources/icons/icon.ico",
       "installerHeaderIcon": "resources/icons/icon.ico"

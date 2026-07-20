@@ -74,7 +74,7 @@ macOS builds produce `dmg` and `zip` artifacts. Windows builds produce an NSIS i
 
 macOS packaging needs Xcode/build tools for notarized builds and icon asset compilation.
 
-Windows packaging needs NSIS support through `electron-builder`. If no Windows signing env is set, `package.mjs` disables code signing and builds an unsigned installer.
+Windows packaging needs NSIS support through `electron-builder`. If no Windows signing env is set, `package.mjs` disables code signing and builds an unsigned installer. The per-user installer creates both an `OpenChamber` desktop shortcut and an `OpenChamber` Start Menu shortcut that launch the installed executable directly, without proxy wrapper arguments.
 
 Linux AppImages must be built natively. Set `OPENCHAMBER_TARGET_ARCH=x64` or `OPENCHAMBER_TARGET_ARCH=arm64` when packaging; the build rejects a target that does not match the Linux host. The same target selects the bundled OpenCode CLI, native Electron rebuild, and Electron Builder architecture. Linux identity is stable across architectures: executable `openchamber`, desktop file `openchamber.desktop`, icon `openchamber`, and `StartupWMClass=openchamber`.
 
