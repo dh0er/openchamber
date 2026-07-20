@@ -5,19 +5,35 @@ description: Połącz dostawców AI, wybierz modele i skonfiguruj agentów.
 
 # Dostawcy, modele i agenci
 
-Zanim OpenChamber cokolwiek zrobi, potrzebuje co najmniej jednego połączonego dostawcy AI. Ta strona opisuje łączenie dostawcy, wybór modelu i dostosowywanie agentów.
+Zanim OpenChamber cokolwiek zrobi, potrzebuje co najmniej jednego połączonego dostawcy AI. Ta strona opisuje łączenie dostawcy, wybór modelu i dostosowywanie agentów. Tego samego dostawcę można dodać wiele razy dla osobnych kont, kluczy API, subskrypcji lub bram.
 
 ## Połącz dostawcę
 
 1. Otwórz **Settings → Providers**.
-2. Otwórz menu **Add provider** i wybierz dostawcę, który nie jest jeszcze połączony.
-3. Zaloguj się na jeden z dwóch sposobów, zależnie od dostawcy:
-   - **Klucz API** — wklej swój klucz i zapisz.
-   - **Logowanie (device flow)** — OpenChamber pokazuje link i krótki kod. Otwórz link, wpisz kod i zatwierdź. OpenChamber sam dokończy łączenie.
+2. Otwórz **Add provider** i wybierz dowolnego dostawcę. Połączeni dostawcy nadal są dostępni, więc możesz dodać kolejną instancję.
+3. Nadaj instancji nazwę, która wskazuje konto lub bramę, na przykład `OpenAI Praca`.
+4. Opcjonalnie wpisz **bazowy adres URL**, aby użyć innego endpointu dostawcy lub niestandardowej bramy.
+5. Połącz się za pomocą **klucza API** albo **logowania (przepływ urządzenia)**, zależnie od dostawcy.
 
-Gdy dostawca pokazuje się jako połączony, jego modele stają się dostępne w czacie.
+Każda instancja zachowuje własną nazwę, dane logowania i bazowy adres URL. Gdy pojawi się jako połączona, jej modele będą dostępne w czacie.
 
-Aby się rozłączyć, otwórz dostawcę i wybierz usunięcie jego logowania.
+Aby odłączyć instancję, otwórz ją i wybierz **Odłącz**.
+
+## Skieruj instancję przez proxy
+
+Trasa proxy jest zapisywana osobno dla każdej zarządzanej instancji z kluczem API:
+
+- **Bezpośrednio** pomija ustawienia proxy dla tej instancji.
+- **Ustawienia systemowe** używają proxy systemu operacyjnego. W Windows obejmuje to rozpoznawanie PAC; w macOS i Linux używane są `HTTP_PROXY` lub `HTTPS_PROXY` z uwzględnieniem `NO_PROXY`.
+- **Ręczne proxy** używa adresu HTTP(S) wpisanego dla tej instancji, na przykład `http://127.0.0.1:9000`.
+
+**Bazowy adres URL** wybiera endpoint API dostawcy; **proxy** wybiera trasę sieciową do tego endpointu.
+
+## Użyj bramy zgodnej z OpenAI
+
+Wybierz **OpenAI Compatible** dla niewbudowanej usługi zgodnej z OpenAI Chat Completions. Wpisz nazwę, wymagany **bazowy adres URL** (ze ścieżką wersji) i klucz API. Dla Frugal Relay użyj `https://frugalrelay.me/v1`.
+
+OpenChamber wczytuje identyfikatory modeli z `<bazowy adres URL>/models`, więc brama musi udostępniać zgodny z OpenAI endpoint `/models` oraz API Chat Completions.
 
 ## Wybierz model
 

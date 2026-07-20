@@ -5,19 +5,35 @@ description: Conecte provedores de IA, escolha modelos e configure agentes.
 
 # Provedores, Modelos e Agentes
 
-Antes de o OpenChamber poder fazer qualquer coisa, ele precisa de pelo menos um provedor de IA conectado. Esta página cobre conectar um provedor, escolher um modelo e personalizar agentes.
+Antes de o OpenChamber poder fazer qualquer coisa, ele precisa de pelo menos um provedor de IA conectado. Esta página cobre conectar um provedor, escolher um modelo e personalizar agentes. Você pode adicionar o mesmo provedor várias vezes para usar contas, chaves de API, assinaturas ou gateways separados.
 
 ## Conectar um provedor
 
 1. Abra **Settings → Providers**.
-2. Abra o menu **Add provider** e escolha um provedor que ainda não esteja conectado.
-3. Faça login de uma de duas maneiras, dependendo do provedor:
-   - **Chave de API** — cole sua chave e salve.
-   - **Login (device flow)** — o OpenChamber mostra um link e um código curto. Abra o link, insira o código e aprove. O OpenChamber conclui a conexão sozinho.
+2. Abra **Add provider** e escolha qualquer provedor. Os provedores conectados continuam disponíveis para que você possa adicionar outra instância.
+3. Dê à instância um nome que identifique a conta ou o gateway, como `OpenAI Trabalho`.
+4. Opcionalmente, insira uma **URL base** para usar outro endpoint do provedor ou um gateway personalizado.
+5. Conecte-se com uma **chave de API** ou com **Login (fluxo de dispositivo)**, dependendo do provedor.
 
-Quando um provedor aparece como conectado, seus modelos ficam disponíveis no chat.
+Cada instância mantém seu próprio nome, credenciais e URL base. Quando ela aparece como conectada, seus modelos ficam disponíveis no chat.
 
-Para desconectar, abra o provedor e escolha remover o login dele.
+Para desconectar uma instância, abra-a e escolha **Desconectar**.
+
+## Encaminhar uma instância por um proxy
+
+A rota do proxy é salva por instância gerenciada com chave de API:
+
+- **Direto** ignora a configuração de proxy dessa instância.
+- **Configurações do sistema** usa o proxy do sistema operacional. No Windows, inclui a resolução de PAC; no macOS e Linux, usa `HTTP_PROXY` ou `HTTPS_PROXY` e respeita `NO_PROXY`.
+- **Proxy manual** usa a origem HTTP(S) informada para essa instância, por exemplo `http://127.0.0.1:9000`.
+
+A **URL base** seleciona o endpoint da API do provedor; o **proxy** seleciona a rota de rede usada para alcançá-lo.
+
+## Usar um gateway compatível com OpenAI
+
+Escolha **OpenAI Compatible** para um serviço compatível com OpenAI Chat Completions que não esteja integrado. Insira um nome, a **URL base** obrigatória (incluindo o caminho da versão) e a chave de API. Para o Frugal Relay, use `https://frugalrelay.me/v1`.
+
+O OpenChamber carrega os IDs de modelo de `<URL base>/models`, então o gateway deve oferecer um endpoint `/models` compatível com OpenAI e a API Chat Completions.
 
 ## Escolher um modelo
 

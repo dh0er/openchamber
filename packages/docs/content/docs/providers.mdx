@@ -5,19 +5,35 @@ description: Connect AI providers, pick models, and set up agents.
 
 # Providers, Models & Agents
 
-Before OpenChamber can do anything, it needs at least one AI provider connected. This page covers connecting a provider, choosing a model, and tailoring agents.
+Before OpenChamber can do anything, it needs at least one AI provider connected. This page covers connecting a provider, choosing a model, and tailoring agents. You can add the same provider more than once for separate accounts, API keys, subscriptions, or gateways.
 
 ## Connect a provider
 
 1. Open **Settings → Providers**.
-2. Open the **Add provider** menu and pick a provider that isn't connected yet.
-3. Sign in one of two ways, depending on the provider:
-   - **API key** — paste your key and save.
-   - **Sign-in (device flow)** — OpenChamber shows a link and a short code. Open the link, enter the code, and approve. OpenChamber finishes connecting on its own.
+2. Open **Add provider** and pick any provider. Connected providers remain available so you can add another instance.
+3. Give the instance a name that identifies the account or gateway, such as `OpenAI Work`.
+4. Optionally enter a **Base URL** when requests should use a custom provider endpoint or gateway.
+5. Sign in with an **API key** or **Sign-in (device flow)**, depending on the provider.
 
-When a provider shows as connected, its models become available in chat.
+When an instance appears as connected, its models become available in chat. Each instance keeps its own name, credentials, and Base URL.
 
-To disconnect, open the provider and choose to remove its sign-in.
+To disconnect an instance, open it and choose **Disconnect**.
+
+## Route one instance through a proxy
+
+Proxy routing is stored per managed API-key instance:
+
+- **Direct** bypasses proxy configuration for that instance.
+- **System settings** uses the operating-system proxy on Windows, including PAC resolution. On macOS and Linux it uses the matching `HTTP_PROXY` or `HTTPS_PROXY` setting and honors `NO_PROXY`.
+- **Manual proxy** uses the HTTP(S) proxy origin entered for that instance, for example `http://127.0.0.1:9000`.
+
+The **Base URL** and **Proxy** fields serve different purposes: Base URL selects the provider API endpoint; Proxy selects the network route used to reach it.
+
+## Use an OpenAI-compatible gateway
+
+Choose **OpenAI Compatible** for a service that supports OpenAI Chat Completions but is not built in. Enter a name, its required **Base URL** (including the version path), and its API key. For Frugal Relay, use `https://frugalrelay.me/v1`.
+
+OpenChamber loads model IDs from `<Base URL>/models`, so the gateway must provide an OpenAI-compatible `/models` endpoint and Chat Completions API.
 
 ## Pick a model
 

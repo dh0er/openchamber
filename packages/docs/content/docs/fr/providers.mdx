@@ -5,19 +5,35 @@ description: Connectez des fournisseurs IA, choisissez des modèles et configure
 
 # Fournisseurs, modèles et agents
 
-Avant qu’OpenChamber puisse faire quoi que ce soit, au moins un fournisseur IA doit être connecté. Cette page explique comment connecter un fournisseur, choisir un modèle et adapter les agents.
+Avant qu’OpenChamber puisse faire quoi que ce soit, au moins un fournisseur IA doit être connecté. Cette page explique comment connecter un fournisseur, choisir un modèle et adapter les agents. Vous pouvez ajouter le même fournisseur plusieurs fois pour utiliser des comptes, clés API, abonnements ou passerelles distincts.
 
 ## Connecter un fournisseur
 
 1. Ouvrez **Paramètres → Fournisseurs**.
-2. Ouvrez le menu **Add provider** et choisissez un fournisseur qui n’est pas encore connecté.
-3. Connectez-vous de l’une des deux façons, selon le fournisseur :
-   - **API key** — collez votre clé et enregistrez.
-   - **Sign-in (device flow)** — OpenChamber affiche un lien et un code court. Ouvrez le lien, saisissez le code et approuvez. OpenChamber termine la connexion tout seul.
+2. Ouvrez **Add provider** et choisissez n’importe quel fournisseur. Les fournisseurs connectés restent disponibles pour ajouter une autre instance.
+3. Donnez à l’instance un nom qui identifie le compte ou la passerelle, par exemple `OpenAI Travail`.
+4. Saisissez éventuellement une **URL de base** pour utiliser un autre endpoint du fournisseur ou une passerelle personnalisée.
+5. Connectez-vous avec une **API key** ou avec **Sign-in (device flow)**, selon le fournisseur.
 
-Quand un fournisseur apparaît comme connecté, ses modèles deviennent disponibles dans le chat.
+Chaque instance conserve son propre nom, ses identifiants et son URL de base. Lorsqu’elle apparaît comme connectée, ses modèles deviennent disponibles dans le chat.
 
-Pour vous déconnecter, ouvrez le fournisseur et choisissez de supprimer sa connexion.
+Pour déconnecter une instance, ouvrez-la et choisissez **Déconnecter**.
+
+## Faire passer une instance par un proxy
+
+Le routage du proxy est enregistré pour chaque instance gérée avec une clé API :
+
+- **Direct** ignore la configuration du proxy pour cette instance.
+- **Paramètres système** utilise le proxy du système d’exploitation. Sous Windows, cela inclut la résolution PAC ; sous macOS et Linux, `HTTP_PROXY` ou `HTTPS_PROXY` est utilisé en respectant `NO_PROXY`.
+- **Proxy manuel** utilise l’origine HTTP(S) indiquée pour cette instance, par exemple `http://127.0.0.1:9000`.
+
+L’**URL de base** sélectionne l’endpoint de l’API du fournisseur ; le **proxy** sélectionne la route réseau utilisée pour l’atteindre.
+
+## Utiliser une passerelle compatible avec OpenAI
+
+Choisissez **OpenAI Compatible** pour un service compatible avec OpenAI Chat Completions qui n’est pas intégré. Saisissez un nom, l’**URL de base** requise (avec le chemin de version) et la clé API. Pour Frugal Relay, utilisez `https://frugalrelay.me/v1`.
+
+OpenChamber charge les identifiants de modèles depuis `<URL de base>/models` ; la passerelle doit donc fournir un endpoint `/models` compatible avec OpenAI et l’API Chat Completions.
 
 ## Choisir un modèle
 
