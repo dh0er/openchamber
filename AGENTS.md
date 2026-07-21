@@ -32,6 +32,15 @@ Electron starts the OpenChamber backend in-process, never as a sidecar. Developm
 
 Shared contracts must define intentional behavior for every applicable runtime: web, desktop, VS Code, hosted mobile, and Capacitor mobile.
 
+## Fork Maintenance
+
+This repository is a fork of upstream OpenChamber. Design every change to keep future rebases onto current upstream as conflict-free as practical:
+
+- Isolate fork-specific behavior in focused, owning modules rather than modifying shared upstream code unnecessarily.
+- Keep upstream-facing integration points thin, explicit, and localized; avoid broad refactors, formatting churn, and unrelated edits in upstream-owned code.
+- Prefer additive extension points and narrowly scoped adapters over changes that entangle fork behavior with upstream internals.
+- When an upstream file must change, make the smallest compatible diff and document the fork-specific contract or invariant near its owning module.
+
 ## Always-On Constraints
 
 - Do not modify `../opencode`; it is a separate repository.

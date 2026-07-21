@@ -6,6 +6,12 @@
 [![Discord](https://img.shields.io/badge/Discord-join.svg?style=flat&labelColor=100F0F&color=8B7EC8&logo=discord&logoColor=FFFCF0)](https://discord.gg/ZYRSdnwwKA)
 [![Support the project](https://img.shields.io/badge/Support-Project-black?style=flat&labelColor=100F0F&color=EC8B49&logo=ko-fi&logoColor=FFFCF0)](https://ko-fi.com/G2G41SAWNS)
 
+> **Fork notice:** This repository adds two fork-specific capabilities on top of upstream OpenChamber:
+> - **Managed provider connections:** multiple named provider instances, including OpenAI-compatible endpoints, with secure API-key storage, model discovery, and per-instance proxy routing across Web, Desktop, and VS Code.
+> - **Windows source updates:** packaged Desktop builds can rebase this fork's verified patch stack onto current upstream, validate and build it in an isolated workspace, then install the resulting updater package.
+>
+> Fork changes are intentionally isolated so future rebases onto upstream remain manageable.
+
 ## **OpenCode, everywhere.** Desktop. Browser. Phone.
 
 ### A rich interface for [OpenCode](https://opencode.ai). Review diffs, manage agents, run dev servers, and keep the big picture while your AI codes.
